@@ -52,6 +52,26 @@ from the same registry if harness installation fails, stores `OPENAI_API_KEY`
 and `ANTHROPIC_API_KEY` through `auth::set_token`, then probes
 `harness::status`, `models::list`, and `auth::status`.
 
+The installed stack must include the execution path, not just the run
+orchestrator. In practice that means `setup` should leave these workers in the
+local iii config:
+
+- `turn-orchestrator`
+- `provider-router`
+- `provider-openai` / `provider-anthropic`
+- `auth-credentials`
+- `models-catalog`
+- `shell`
+- `approval-gate`
+- `skills`
+- `iii-sandbox`
+
+`iii-sandbox` is required for `shell::*` tool calls. Its default config allows
+the `python` and `node` sandbox images, auto-installs root filesystems on first
+use, and reaps idle sandboxes after 300 seconds. Host support is required:
+Apple Silicon macOS or Linux with readable `/dev/kvm`; Windows and Intel Macs
+cannot boot the sandbox microVMs.
+
 Secrets are intentionally not accepted through CLI flags because argv can leak
 through process listings and error logs.
 
@@ -91,6 +111,11 @@ iii-code sessions
 iii-code abort <session-id>
 ```
 
+`--image` selects the sandbox image used by `shell::*` tools. The default is
+`python`; use `--image node` for JavaScript/TypeScript repo work. If you add
+custom sandbox images in `config.yaml`, they must also be allowed by the
+`iii-sandbox` config before runs can boot them.
+
 Use `--wait` for smoke tests and non-interactive validation:
 
 ```bash
@@ -114,6 +139,7 @@ Useful checks:
 
 ```bash
 iii worker list
+iii worker list | rg 'iii-sandbox|shell|turn-orchestrator|provider-router'
 iii-code doctor
 iii-code models
 ```
