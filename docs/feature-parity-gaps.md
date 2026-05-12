@@ -55,7 +55,12 @@ workers from the public registry as a fallback.
   `idle_timeout_secs`, and `max_turns`.
 - `sessions` lists durable run sessions from `state::list`.
 - `abort` calls `router::abort`.
-- Errors from `auth::set_token` redact the JSON payload before display.
+- `workers`, `functions`, and `call` expose the broader worker graph without
+  adding worker-specific code to the CLI.
+- `state` and `stream` expose shared engine primitives.
+- `approvals` lists and resolves `approval-gate` requests.
+- `sandbox` wraps the main `iii-sandbox` lifecycle and exec functions.
+- Errors from `iii trigger` redact JSON payloads before display.
 
 ## Parity Gaps
 
@@ -67,8 +72,8 @@ Features that map cleanly to existing iii workers:
   the missing piece is better CLI formatting and defaults.
 - Permission presets. This should compile to `approval_required` values and
   policy worker configuration.
-- Continue/resume ergonomics. `resume <session-id>` exists; next work is a
-  better selector using `sessions`.
+- Continue/resume ergonomics. `resume <session-id>` and `sessions` exist; next
+  work is an interactive selector.
 - Session audit and benchmark smoke runs. These should use `run::start_and_wait`
   and stored `agent` state.
 

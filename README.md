@@ -15,6 +15,10 @@ The boundary is the public `iii` CLI and worker functions:
 - session listing through `state::list` over the `agent` scope and `session/`
   prefix
 - abort through `router::abort`
+- worker and function discovery through `engine::*::list`
+- direct calls into any worker through `iii-code call`
+- approval resolution through `approval::resolve`
+- sandbox lifecycle through `sandbox::*`
 
 `iii-code` does not recreate the harness stack. The harness worker from
 `iii-hq/workers` is the source of truth for `turn-orchestrator`,
@@ -122,6 +126,47 @@ Use `--wait` for smoke tests and non-interactive validation:
 iii-code run "reply with hi" --wait
 ```
 
+## Worker Surface
+
+`iii-code` is also a thin operator shell for connected workers. Use these when
+the task needs a worker that is not hard-coded into the coding-session flow:
+
+```bash
+iii-code workers
+iii-code workers --connected
+iii-code functions --filter sandbox
+iii-code call models::list --payload '{"provider":"openai"}'
+iii-code call custom::function --payload-file payload.json
+```
+
+State and stream helpers expose the shared engine primitives:
+
+```bash
+iii-code state get agent session/<session-id>/turn_state
+iii-code state list agent --prefix session/
+iii-code state set scratch answer '{"ok":true}'
+iii-code state delete scratch answer
+iii-code stream list agent::events --group-id <session-id>
+```
+
+Approvals are first-class, so terminal runs can block on protected tools and be
+released from another terminal:
+
+```bash
+iii-code approvals list <session-id>
+iii-code approvals allow <session-id> <function-call-id>
+iii-code approvals deny <session-id> <function-call-id> --reason "not safe"
+```
+
+Sandbox commands are direct wrappers over `iii-sandbox`:
+
+```bash
+iii-code sandbox create --image node --name test-runner
+iii-code sandbox exec <sandbox-id> npm test
+iii-code sandbox list
+iii-code sandbox stop <sandbox-id> --wait
+```
+
 ## Diagnostics
 
 ```bash
@@ -129,6 +174,8 @@ iii-code doctor
 iii-code models
 iii-code models --provider openai
 iii-code sessions
+iii-code workers --connected
+iii-code functions --filter run::
 ```
 
 `doctor` is read-only. It reports the installed iii version, managed worker

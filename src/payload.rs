@@ -157,6 +157,118 @@ pub fn build_abort_payload(session_id: &str) -> Value {
     json!({ "session_id": session_id })
 }
 
+pub fn build_functions_payload(include_internal: bool) -> Value {
+    json!({ "include_internal": include_internal })
+}
+
+pub fn build_connected_workers_payload(worker_id: Option<&str>) -> Value {
+    match worker_id {
+        Some(worker_id) => json!({ "worker_id": worker_id }),
+        None => json!({}),
+    }
+}
+
+pub fn build_state_get_payload(scope: &str, key: &str) -> Value {
+    json!({ "scope": scope, "key": key })
+}
+
+pub fn build_state_list_payload(scope: &str, prefix: Option<&str>) -> Value {
+    let mut payload = json!({ "scope": scope });
+    if let Some(prefix) = prefix {
+        payload["prefix"] = json!(prefix);
+    }
+    payload
+}
+
+pub fn build_state_set_payload(scope: &str, key: &str, value: Value) -> Value {
+    json!({ "scope": scope, "key": key, "value": value })
+}
+
+pub fn build_approval_list_payload(session_id: Option<&str>) -> Value {
+    match session_id {
+        Some(session_id) => json!({ "session_id": session_id }),
+        None => json!({}),
+    }
+}
+
+pub fn build_approval_resolve_payload(
+    session_id: &str,
+    function_call_id: &str,
+    decision: &str,
+    reason: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "session_id": session_id,
+        "function_call_id": function_call_id,
+        "decision": decision,
+    });
+    if let Some(reason) = reason {
+        payload["reason"] = json!(reason);
+    }
+    payload
+}
+
+pub fn build_stream_list_payload_for(stream_name: &str, group_id: Option<&str>) -> Value {
+    let mut payload = json!({ "stream_name": stream_name });
+    if let Some(group_id) = group_id {
+        payload["group_id"] = json!(group_id);
+    }
+    payload
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxCreatePayloadParams {
+    pub image: String,
+    pub name: Option<String>,
+    pub network: bool,
+    pub idle_timeout_secs: Option<u32>,
+    pub cpus: Option<u32>,
+    pub memory_mb: Option<u32>,
+}
+
+pub fn build_sandbox_create_payload(params: SandboxCreatePayloadParams) -> Value {
+    let mut payload = json!({
+        "image": params.image,
+        "network": params.network,
+    });
+    if let Some(name) = params.name {
+        payload["name"] = json!(name);
+    }
+    if let Some(idle_timeout_secs) = params.idle_timeout_secs {
+        payload["idle_timeout_secs"] = json!(idle_timeout_secs);
+    }
+    if let Some(cpus) = params.cpus {
+        payload["cpus"] = json!(cpus);
+    }
+    if let Some(memory_mb) = params.memory_mb {
+        payload["memory_mb"] = json!(memory_mb);
+    }
+    payload
+}
+
+pub fn build_sandbox_exec_payload(
+    sandbox_id: &str,
+    cmd: &str,
+    args: Vec<String>,
+    timeout_ms: u64,
+    workdir: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "sandbox_id": sandbox_id,
+        "cmd": cmd,
+        "args": args,
+        "timeout_ms": timeout_ms,
+    });
+    if let Some(workdir) = workdir {
+        payload["workdir"] = json!(workdir);
+    }
+    payload
+}
+
+pub fn build_sandbox_stop_payload(sandbox_id: &str, wait: bool) -> Value {
+    json!({ "sandbox_id": sandbox_id, "wait": wait })
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -242,5 +354,41 @@ mod tests {
         assert_eq!(build_sessions_payload()["scope"], "agent");
         assert_eq!(build_sessions_payload()["prefix"], "session/");
         assert_eq!(build_abort_payload("s1")["session_id"], "s1");
+    }
+
+    #[test]
+    fn builds_worker_state_approval_and_sandbox_payloads() {
+        assert_eq!(build_functions_payload(true)["include_internal"], true);
+        assert_eq!(
+            build_connected_workers_payload(Some("w1"))["worker_id"],
+            "w1"
+        );
+        assert_eq!(build_state_get_payload("s", "k")["key"], "k");
+        assert_eq!(build_state_list_payload("s", Some("p"))["prefix"], "p");
+        assert_eq!(build_state_set_payload("s", "k", json!(1))["value"], 1);
+        assert_eq!(
+            build_approval_resolve_payload("s", "fc", "deny", Some("no"))["reason"],
+            "no"
+        );
+        assert_eq!(
+            build_stream_list_payload_for("agent::events", Some("s1"))["group_id"],
+            "s1"
+        );
+        assert_eq!(
+            build_sandbox_create_payload(SandboxCreatePayloadParams {
+                image: "node".into(),
+                name: Some("job".into()),
+                network: true,
+                idle_timeout_secs: Some(10),
+                cpus: Some(2),
+                memory_mb: Some(1024),
+            })["image"],
+            "node"
+        );
+        assert_eq!(
+            build_sandbox_exec_payload("sb", "npm", vec!["test".into()], 30_000, Some("/repo"))["cmd"],
+            "npm"
+        );
+        assert_eq!(build_sandbox_stop_payload("sb", true)["wait"], true);
     }
 }

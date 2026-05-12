@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::io::Write;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -7,14 +8,22 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AbortArgs, Cli, Command, ModelsArgs, ResumeArgs, RunArgs, SessionsArgs, SetupArgs,
+    AbortArgs, ApprovalDenyArgs, ApprovalResolveArgs, ApprovalsArgs, ApprovalsCommand,
+    ApprovalsListArgs, CallArgs, Cli, Command, FunctionsArgs, ModelsArgs, ResumeArgs, RunArgs,
+    SandboxArgs, SandboxCommand, SandboxCreateArgs, SandboxExecArgs, SandboxStopArgs, SessionsArgs,
+    SetupArgs, StateArgs, StateCommand, StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs,
+    StreamArgs, StreamCommand, WorkersArgs,
 };
 use crate::events::{is_agent_end, normalize_stream_item, render_event, render_final_messages};
 use crate::iii::{CommandRunner, IiiClient};
 use crate::payload::{
-    RunPayloadParams, build_abort_payload, build_auth_payload, build_auth_status_payload,
-    build_models_payload, build_run_payload, build_sessions_payload, build_stream_list_payload,
-    current_cwd_metadata, new_session_id, resolve_provider_model,
+    RunPayloadParams, SandboxCreatePayloadParams, build_abort_payload, build_approval_list_payload,
+    build_approval_resolve_payload, build_auth_payload, build_auth_status_payload,
+    build_connected_workers_payload, build_functions_payload, build_models_payload,
+    build_run_payload, build_sandbox_create_payload, build_sandbox_exec_payload,
+    build_sandbox_stop_payload, build_sessions_payload, build_state_get_payload,
+    build_state_list_payload, build_state_set_payload, build_stream_list_payload,
+    build_stream_list_payload_for, current_cwd_metadata, new_session_id, resolve_provider_model,
 };
 
 const DOCTOR_PROBE_TIMEOUT_MS: u64 = 1_000;
@@ -29,6 +38,13 @@ pub fn run<R: CommandRunner, W: Write>(cli: Cli, runner: R, out: &mut W) -> Resu
         Command::Abort(args) => abort_session(&client, args, out),
         Command::Doctor => doctor(&client, out),
         Command::Models(args) => models(&client, args, out),
+        Command::Workers(args) => workers(&client, args, out),
+        Command::Functions(args) => functions(&client, args, out),
+        Command::Call(args) => call_function(&client, args, out),
+        Command::State(args) => state(&client, args, out),
+        Command::Stream(args) => stream(&client, args, out),
+        Command::Approvals(args) => approvals(&client, args, out),
+        Command::Sandbox(args) => sandbox(&client, args, out),
     }
 }
 
@@ -516,6 +532,272 @@ fn print_models<W: Write>(value: &Value, out: &mut W) -> Result<()> {
     Ok(())
 }
 
+fn workers<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: WorkersArgs,
+    out: &mut W,
+) -> Result<()> {
+    if args.connected {
+        let value = client
+            .trigger(
+                "engine::workers::list",
+                build_connected_workers_payload(args.worker_id.as_deref()),
+                5_000,
+            )
+            .context("list connected workers")?;
+        print_json(&value, out)
+    } else {
+        if args.worker_id.is_some() {
+            return Err(anyhow!("--worker-id requires --connected"));
+        }
+        let text = client.worker_list().context("list configured workers")?;
+        write!(out, "{text}")?;
+        Ok(())
+    }
+}
+
+fn functions<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: FunctionsArgs,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "engine::functions::list",
+            build_functions_payload(args.include_internal),
+            5_000,
+        )
+        .context("list functions")?;
+    let value = filter_json_array(value, args.filter.as_deref());
+    print_json(&value, out)
+}
+
+fn call_function<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: CallArgs,
+    out: &mut W,
+) -> Result<()> {
+    let payload = json_arg(args.payload.as_deref(), args.payload_file.as_ref())?;
+    let value = client
+        .trigger(&args.function_id, payload, args.timeout_ms)
+        .with_context(|| format!("call {}", args.function_id))?;
+    print_json(&value, out)
+}
+
+fn state<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: StateArgs,
+    out: &mut W,
+) -> Result<()> {
+    let (function_id, payload, timeout_ms) = match args.command {
+        StateCommand::Get(args) => state_get(args),
+        StateCommand::List(args) => state_list(args),
+        StateCommand::Set(args) => state_set(args)?,
+        StateCommand::Delete(args) => state_delete(args),
+    };
+    let value = client
+        .trigger(function_id, payload, timeout_ms)
+        .with_context(|| format!("call {function_id}"))?;
+    print_json(&value, out)
+}
+
+fn state_get(args: StateGetArgs) -> (&'static str, Value, u64) {
+    (
+        "state::get",
+        build_state_get_payload(&args.scope, &args.key),
+        5_000,
+    )
+}
+
+fn state_list(args: StateListArgs) -> (&'static str, Value, u64) {
+    (
+        "state::list",
+        build_state_list_payload(&args.scope, args.prefix.as_deref()),
+        5_000,
+    )
+}
+
+fn state_set(args: StateSetArgs) -> Result<(&'static str, Value, u64)> {
+    let value = parse_json_value(&args.value).context("parse state value JSON")?;
+    Ok((
+        "state::set",
+        build_state_set_payload(&args.scope, &args.key, value),
+        5_000,
+    ))
+}
+
+fn state_delete(args: StateDeleteArgs) -> (&'static str, Value, u64) {
+    (
+        "state::delete",
+        build_state_get_payload(&args.scope, &args.key),
+        5_000,
+    )
+}
+
+fn stream<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: StreamArgs,
+    out: &mut W,
+) -> Result<()> {
+    match args.command {
+        StreamCommand::List(args) => {
+            let value = client
+                .trigger(
+                    "stream::list",
+                    build_stream_list_payload_for(&args.stream_name, args.group_id.as_deref()),
+                    5_000,
+                )
+                .context("list stream frames")?;
+            print_json(&value, out)
+        }
+    }
+}
+
+fn approvals<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: ApprovalsArgs,
+    out: &mut W,
+) -> Result<()> {
+    let (function_id, payload) = match args.command {
+        ApprovalsCommand::List(args) => approval_list(args),
+        ApprovalsCommand::Allow(args) => approval_allow(args),
+        ApprovalsCommand::Deny(args) => approval_deny(args),
+    };
+    let value = client
+        .trigger(function_id, payload, 5_000)
+        .with_context(|| format!("call {function_id}"))?;
+    print_json(&value, out)
+}
+
+fn approval_list(args: ApprovalsListArgs) -> (&'static str, Value) {
+    (
+        "approval::list_pending",
+        build_approval_list_payload(args.session_id.as_deref()),
+    )
+}
+
+fn approval_allow(args: ApprovalResolveArgs) -> (&'static str, Value) {
+    (
+        "approval::resolve",
+        build_approval_resolve_payload(&args.session_id, &args.function_call_id, "allow", None),
+    )
+}
+
+fn approval_deny(args: ApprovalDenyArgs) -> (&'static str, Value) {
+    (
+        "approval::resolve",
+        build_approval_resolve_payload(
+            &args.session_id,
+            &args.function_call_id,
+            "deny",
+            args.reason.as_deref(),
+        ),
+    )
+}
+
+fn sandbox<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: SandboxArgs,
+    out: &mut W,
+) -> Result<()> {
+    let (function_id, payload, timeout_ms) = match args.command {
+        SandboxCommand::List => ("sandbox::list", json!({}), 5_000),
+        SandboxCommand::Create(args) => sandbox_create(args),
+        SandboxCommand::Exec(args) => sandbox_exec(args),
+        SandboxCommand::Stop(args) => sandbox_stop(args),
+    };
+    let value = client
+        .trigger(function_id, payload, timeout_ms)
+        .with_context(|| format!("call {function_id}"))?;
+    print_json(&value, out)
+}
+
+fn sandbox_create(args: SandboxCreateArgs) -> (&'static str, Value, u64) {
+    (
+        "sandbox::create",
+        build_sandbox_create_payload(SandboxCreatePayloadParams {
+            image: args.image,
+            name: args.name,
+            network: args.network,
+            idle_timeout_secs: args.idle_timeout_secs,
+            cpus: args.cpus,
+            memory_mb: args.memory_mb,
+        }),
+        300_000,
+    )
+}
+
+fn sandbox_exec(args: SandboxExecArgs) -> (&'static str, Value, u64) {
+    (
+        "sandbox::exec",
+        build_sandbox_exec_payload(
+            &args.sandbox_id,
+            &args.cmd,
+            args.args,
+            args.timeout_ms,
+            args.workdir.as_deref(),
+        ),
+        args.timeout_ms.saturating_add(5_000),
+    )
+}
+
+fn sandbox_stop(args: SandboxStopArgs) -> (&'static str, Value, u64) {
+    (
+        "sandbox::stop",
+        build_sandbox_stop_payload(&args.sandbox_id, args.wait),
+        30_000,
+    )
+}
+
+fn json_arg(payload: Option<&str>, payload_file: Option<&std::path::PathBuf>) -> Result<Value> {
+    match (payload, payload_file) {
+        (Some(payload), None) => parse_json_value(payload).context("parse --payload JSON"),
+        (None, Some(path)) => {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("read payload file {}", path.display()))?;
+            parse_json_value(&text).context("parse --payload-file JSON")
+        }
+        (None, None) => Ok(json!({})),
+        (Some(_), Some(_)) => Err(anyhow!("use --payload or --payload-file, not both")),
+    }
+}
+
+fn parse_json_value(input: &str) -> Result<Value> {
+    serde_json::from_str(input).with_context(|| format!("invalid JSON: {input}"))
+}
+
+fn print_json<W: Write>(value: &Value, out: &mut W) -> Result<()> {
+    writeln!(out, "{}", serde_json::to_string_pretty(value)?)?;
+    Ok(())
+}
+
+fn filter_json_array(value: Value, filter: Option<&str>) -> Value {
+    let Some(filter) = filter else {
+        return value;
+    };
+    let filter = filter.to_ascii_lowercase();
+    match value {
+        Value::Array(items) => Value::Array(filter_items(items, &filter)),
+        Value::Object(mut object) => {
+            if let Some(Value::Array(items)) = object.remove("functions") {
+                object.insert(
+                    "functions".to_string(),
+                    Value::Array(filter_items(items, &filter)),
+                );
+            }
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
+fn filter_items(items: Vec<Value>, filter: &str) -> Vec<Value> {
+    items
+        .into_iter()
+        .filter(|item| item.to_string().to_ascii_lowercase().contains(filter))
+        .collect()
+}
+
 fn credential(env_name: &str, ignore_env: bool) -> Option<String> {
     if ignore_env {
         None
@@ -729,5 +1011,106 @@ mod tests {
         let calls = runner.calls.borrow();
         assert!(calls[0].contains(&"router::abort".to_string()));
         assert!(calls[0].contains(&json!({"session_id":"s1"}).to_string()));
+    }
+
+    #[test]
+    fn call_invokes_arbitrary_function_with_payload() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"{"models":[]}"#)]);
+        let cli = Cli::try_parse_from([
+            "iii-code",
+            "call",
+            "models::list",
+            "--payload",
+            r#"{"provider":"openai"}"#,
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"models::list".to_string()));
+        assert!(calls[0].contains(&json!({"provider":"openai"}).to_string()));
+        assert!(String::from_utf8(out).unwrap().contains("\"models\""));
+    }
+
+    #[test]
+    fn functions_lists_registered_functions() {
+        let runner = MockRunner::new(vec![MockRunner::ok(
+            r#"{"functions":[{"id":"run::start"},{"id":"models::list"}]}"#,
+        )]);
+        let cli = Cli::try_parse_from(["iii-code", "functions", "--filter", "models"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"engine::functions::list".to_string()));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("models::list"));
+        assert!(!text.contains("run::start"));
+    }
+
+    #[test]
+    fn workers_can_list_connected_workers() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"[{"worker_id":"w1"}]"#)]);
+        let cli = Cli::try_parse_from(["iii-code", "workers", "--connected"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"engine::workers::list".to_string()));
+        assert!(String::from_utf8(out).unwrap().contains("w1"));
+    }
+
+    #[test]
+    fn state_set_parses_json_value() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"{"ok":true}"#)]);
+        let cli = Cli::try_parse_from(["iii-code", "state", "set", "scope", "key", r#"{"a":1}"#])
+            .unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"state::set".to_string()));
+        assert!(
+            calls[0].contains(&json!({"scope":"scope","key":"key","value":{"a":1}}).to_string())
+        );
+    }
+
+    #[test]
+    fn approvals_resolve_calls_approval_worker() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"{"ok":true}"#)]);
+        let cli = Cli::try_parse_from(["iii-code", "approvals", "allow", "s1", "fc1"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"approval::resolve".to_string()));
+        assert!(calls[0].contains(
+            &json!({"session_id":"s1","function_call_id":"fc1","decision":"allow"}).to_string()
+        ));
+    }
+
+    #[test]
+    fn sandbox_exec_calls_sandbox_worker() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"{"success":true}"#)]);
+        let cli =
+            Cli::try_parse_from(["iii-code", "sandbox", "exec", "sb1", "npm", "test"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"sandbox::exec".to_string()));
+        assert!(
+            calls[0].contains(
+                &json!({"sandbox_id":"sb1","cmd":"npm","args":["test"],"timeout_ms":30000u64})
+                    .to_string()
+            )
+        );
     }
 }

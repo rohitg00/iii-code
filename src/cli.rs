@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -31,6 +33,20 @@ pub enum Command {
     Doctor,
     #[command(about = "List models from the iii models catalog")]
     Models(ModelsArgs),
+    #[command(about = "List configured or connected workers")]
+    Workers(WorkersArgs),
+    #[command(about = "List registered iii functions")]
+    Functions(FunctionsArgs),
+    #[command(about = "Call any iii function with a JSON payload")]
+    Call(CallArgs),
+    #[command(about = "Read and write iii state")]
+    State(StateArgs),
+    #[command(about = "Inspect iii streams")]
+    Stream(StreamArgs),
+    #[command(about = "List and resolve approval-gate requests")]
+    Approvals(ApprovalsArgs),
+    #[command(about = "Manage iii sandboxes")]
+    Sandbox(SandboxArgs),
 }
 
 #[derive(Debug, Args)]
@@ -143,6 +159,202 @@ pub struct ModelsArgs {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct WorkersArgs {
+    #[arg(long)]
+    pub connected: bool,
+
+    #[arg(long)]
+    pub worker_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FunctionsArgs {
+    #[arg(long)]
+    pub include_internal: bool,
+
+    #[arg(long)]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CallArgs {
+    #[arg(help = "iii function id, for example models::list")]
+    pub function_id: String,
+
+    #[arg(long, conflicts_with = "payload_file")]
+    pub payload: Option<String>,
+
+    #[arg(long = "payload-file", conflicts_with = "payload")]
+    pub payload_file: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct StateArgs {
+    #[command(subcommand)]
+    pub command: StateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StateCommand {
+    #[command(about = "Get one state value")]
+    Get(StateGetArgs),
+    #[command(about = "List state values in a scope")]
+    List(StateListArgs),
+    #[command(about = "Set one state value")]
+    Set(StateSetArgs),
+    #[command(about = "Delete one state value")]
+    Delete(StateDeleteArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StateGetArgs {
+    pub scope: String,
+    pub key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct StateListArgs {
+    pub scope: String,
+
+    #[arg(long)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StateSetArgs {
+    pub scope: String,
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Args)]
+pub struct StateDeleteArgs {
+    pub scope: String,
+    pub key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct StreamArgs {
+    #[command(subcommand)]
+    pub command: StreamCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StreamCommand {
+    #[command(about = "List stream frames")]
+    List(StreamListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StreamListArgs {
+    pub stream_name: String,
+
+    #[arg(long)]
+    pub group_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ApprovalsArgs {
+    #[command(subcommand)]
+    pub command: ApprovalsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApprovalsCommand {
+    #[command(about = "List pending approvals")]
+    List(ApprovalsListArgs),
+    #[command(about = "Allow one pending approval")]
+    Allow(ApprovalResolveArgs),
+    #[command(about = "Deny one pending approval")]
+    Deny(ApprovalDenyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApprovalsListArgs {
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ApprovalResolveArgs {
+    pub session_id: String,
+    pub function_call_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ApprovalDenyArgs {
+    pub session_id: String,
+    pub function_call_id: String,
+
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxArgs {
+    #[command(subcommand)]
+    pub command: SandboxCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxCommand {
+    #[command(about = "List active sandboxes")]
+    List,
+    #[command(about = "Create a sandbox")]
+    Create(SandboxCreateArgs),
+    #[command(about = "Run a command inside a sandbox")]
+    Exec(SandboxExecArgs),
+    #[command(about = "Stop a sandbox")]
+    Stop(SandboxStopArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxCreateArgs {
+    #[arg(long, default_value = "python")]
+    pub image: String,
+
+    #[arg(long)]
+    pub name: Option<String>,
+
+    #[arg(long)]
+    pub network: bool,
+
+    #[arg(long)]
+    pub idle_timeout_secs: Option<u32>,
+
+    #[arg(long)]
+    pub cpus: Option<u32>,
+
+    #[arg(long)]
+    pub memory_mb: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxExecArgs {
+    pub sandbox_id: String,
+    pub cmd: String,
+
+    #[arg(num_args = 0.., trailing_var_arg = true)]
+    pub args: Vec<String>,
+
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+
+    #[arg(long)]
+    pub workdir: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxStopArgs {
+    pub sandbox_id: String,
+
+    #[arg(long)]
+    pub wait: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +419,75 @@ mod tests {
         match abort.command {
             Command::Abort(args) => assert_eq!(args.session_id, "s1"),
             _ => panic!("expected abort command"),
+        }
+    }
+
+    #[test]
+    fn parses_worker_function_and_call_commands() {
+        let workers = Cli::try_parse_from(["iii-code", "workers", "--connected"]).unwrap();
+        match workers.command {
+            Command::Workers(args) => assert!(args.connected),
+            _ => panic!("expected workers command"),
+        }
+
+        let functions =
+            Cli::try_parse_from(["iii-code", "functions", "--include-internal"]).unwrap();
+        match functions.command {
+            Command::Functions(args) => assert!(args.include_internal),
+            _ => panic!("expected functions command"),
+        }
+
+        let call = Cli::try_parse_from([
+            "iii-code",
+            "call",
+            "models::list",
+            "--payload",
+            r#"{"provider":"openai"}"#,
+        ])
+        .unwrap();
+        match call.command {
+            Command::Call(args) => assert_eq!(args.function_id, "models::list"),
+            _ => panic!("expected call command"),
+        }
+    }
+
+    #[test]
+    fn parses_state_approval_and_sandbox_commands() {
+        let state = Cli::try_parse_from(["iii-code", "state", "get", "agent", "k"]).unwrap();
+        match state.command {
+            Command::State(args) => match args.command {
+                StateCommand::Get(args) => assert_eq!(args.scope, "agent"),
+                _ => panic!("expected state get command"),
+            },
+            _ => panic!("expected state command"),
+        }
+
+        let approval = Cli::try_parse_from([
+            "iii-code",
+            "approvals",
+            "deny",
+            "s1",
+            "fc1",
+            "--reason",
+            "no",
+        ])
+        .unwrap();
+        match approval.command {
+            Command::Approvals(args) => match args.command {
+                ApprovalsCommand::Deny(args) => assert_eq!(args.reason.as_deref(), Some("no")),
+                _ => panic!("expected approval deny command"),
+            },
+            _ => panic!("expected approvals command"),
+        }
+
+        let sandbox =
+            Cli::try_parse_from(["iii-code", "sandbox", "exec", "sb1", "npm", "test"]).unwrap();
+        match sandbox.command {
+            Command::Sandbox(args) => match args.command {
+                SandboxCommand::Exec(args) => assert_eq!(args.args, vec!["test"]),
+                _ => panic!("expected sandbox exec command"),
+            },
+            _ => panic!("expected sandbox command"),
         }
     }
 }
