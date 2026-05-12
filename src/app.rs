@@ -605,18 +605,25 @@ fn sessions<R: CommandRunner, W: Write>(
     args: SessionsArgs,
     out: &mut W,
 ) -> Result<()> {
-    let value = client
-        .trigger(
-            "session-tree::list",
-            build_sessions_payload(args.limit),
-            5_000,
-        )
-        .or_else(|_| {
-            client
-                .trigger("state::list", build_legacy_sessions_payload(), 5_000)
-                .context("list legacy persisted run sessions")
-        })?;
+    let tree_value = client.trigger(
+        "session-tree::list",
+        build_sessions_payload(args.limit),
+        5_000,
+    );
+    let value = match tree_value {
+        Ok(value) if session_tree_is_empty(&value) => client
+            .trigger("state::list", build_legacy_sessions_payload(), 5_000)
+            .unwrap_or(value),
+        Ok(value) => value,
+        Err(_) => client
+            .trigger("state::list", build_legacy_sessions_payload(), 5_000)
+            .context("list legacy persisted run sessions")?,
+    };
     print_sessions(&value, args.limit, out)
+}
+
+fn session_tree_is_empty(value: &Value) -> bool {
+    value.get("total").and_then(Value::as_u64) == Some(0)
 }
 
 fn messages<R: CommandRunner, W: Write>(
@@ -1547,6 +1554,23 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("iii-code"));
         assert!(text.contains("type /help"));
+    }
+
+    #[test]
+    fn sessions_falls_back_when_session_tree_is_empty() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok(r#"{"sessions":[],"total":0}"#),
+            MockRunner::ok(
+                r#"[{"session_id":"legacy","state":"stopped","turn_count":1,"updated_at_ms":2}]"#,
+            ),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "sessions"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("legacy"));
     }
 
     #[test]
