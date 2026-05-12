@@ -40,7 +40,21 @@ pub fn render_event(event: &Value) -> Option<String> {
                 .or_else(|| event.get("tool_name"))
                 .and_then(Value::as_str)
                 .unwrap_or("<unknown>");
-            Some(format!("approval requested: {function_id}"))
+            let call_id = event
+                .get("function_call_id")
+                .or_else(|| event.get("tool_call_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            Some(format!(
+                "approval requested: {function_id} ({call_id}); resolve with iii-code approvals allow <session-id> {call_id}"
+            ))
+        }
+        "approval_resolved" => {
+            let decision = event
+                .get("decision")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            Some(format!("approval resolved: {decision}"))
         }
         "agent_end" => Some("session ended".into()),
         _ => None,
@@ -111,5 +125,20 @@ mod tests {
     fn detects_agent_end() {
         assert!(is_agent_end(&json!({ "type": "agent_end" })));
         assert!(!is_agent_end(&json!({ "type": "turn_end" })));
+    }
+
+    #[test]
+    fn renders_approval_request_with_call_id() {
+        let event = json!({
+            "type": "approval_requested",
+            "function_id": "shell::fs::write",
+            "function_call_id": "fc1"
+        });
+
+        let rendered = render_event(&event).unwrap();
+
+        assert!(rendered.contains("shell::fs::write"));
+        assert!(rendered.contains("fc1"));
+        assert!(rendered.contains("approvals allow"));
     }
 }
