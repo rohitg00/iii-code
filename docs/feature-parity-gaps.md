@@ -25,8 +25,9 @@ The harness worker declares the core stack in `harness/iii.worker.yaml`:
 `skills`, `approval-gate`, and `iii-sandbox`.
 
 `iii-code` should add terminal UX and payload construction around those workers.
-It should not publish a competing harness, checked-in worker lockfile, or local
-fallback stack.
+It should not publish a competing harness or checked-in worker lockfile. If the
+harness artifact is temporarily unavailable, the CLI may install the same core
+workers from the public registry as a fallback.
 
 ## Covered By Existing Workers
 
@@ -45,8 +46,8 @@ fallback stack.
 
 ## Added In This CLI
 
-- Setup uses only `iii worker add harness` and fails loudly if the public
-  harness artifact is invalid.
+- Setup uses `iii worker add harness` first, logs harness installation errors,
+  and falls back to the core worker stack from the public registry.
 - Provider credentials are read from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
   and stored through `auth::set_token`; argv secret flags are not supported.
 - `run` and `resume` construct the current `turn-orchestrator` payload,
@@ -90,5 +91,5 @@ Features that need more design before adding:
 
 As of `iii-hq/workers@90fc9fe`, `iii worker add harness` reaches the harness
 artifact and then fails the final SHA256 check in the public registry. That is
-an upstream registry/artifact issue. `iii-code` deliberately does not work
-around it by installing individual workers one by one.
+an upstream registry/artifact issue. `iii-code` falls back to installing the
+core workers individually from the same registry while that artifact is fixed.

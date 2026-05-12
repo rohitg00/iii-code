@@ -2,6 +2,29 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::process::Command;
 
+pub const CORE_WORKER_STACK: &[&str] = &[
+    "iii-state",
+    "iii-queue",
+    "iii-stream",
+    "iii-bridge",
+    "iii-http",
+    "turn-orchestrator",
+    "provider-router",
+    "session-tree",
+    "session-inbox",
+    "models-catalog",
+    "hook-fanout",
+    "policy-denylist",
+    "shell",
+    "provider-anthropic",
+    "provider-openai",
+    "auth-credentials",
+    "llm-budget",
+    "skills",
+    "approval-gate",
+    "iii-sandbox",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub status: i32,
@@ -61,6 +84,13 @@ impl<R: CommandRunner> IiiClient<R> {
         Ok(join_output(&out))
     }
 
+    pub fn worker_add_core(&self) -> Result<String> {
+        let mut args = vec!["worker".into(), "add".into(), "--no-wait".into()];
+        args.extend(CORE_WORKER_STACK.iter().map(|worker| worker.to_string()));
+        let out = self.checked_run(args)?;
+        Ok(join_output(&out))
+    }
+
     pub fn worker_list(&self) -> Result<String> {
         let out = self.checked_run(vec!["worker".into(), "list".into()])?;
         Ok(join_output(&out))
@@ -104,7 +134,12 @@ fn display_args(args: &[String]) -> String {
 }
 
 fn sanitize_args(args: &[String]) -> Vec<String> {
-    let redact_payload = args.iter().any(|arg| arg == "auth::set_token");
+    let redact_payload = args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "auth::set_token" | "run::start" | "run::start_and_wait"
+        )
+    });
     let mut sanitized = Vec::with_capacity(args.len());
     let mut redact_next = false;
 
@@ -220,6 +255,28 @@ pub mod tests {
 
         assert!(err.contains("--payload [REDACTED]"));
         assert!(!err.contains("test-secret-value"));
+    }
+
+    #[test]
+    fn checked_run_redacts_run_payload_in_errors() {
+        let runner = MockRunner::new(vec![CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "run failed".into(),
+        }]);
+        let client = IiiClient::new(&runner, "127.0.0.1", 49134);
+
+        let err = client
+            .trigger(
+                "run::start",
+                serde_json::json!({"messages":[{"content":"private prompt"}]}),
+                5_000,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("--payload [REDACTED]"));
+        assert!(!err.contains("private prompt"));
     }
 
     #[test]

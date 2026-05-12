@@ -6,7 +6,8 @@ runtime, and does not keep its own secrets store.
 
 The boundary is the public `iii` CLI and worker functions:
 
-- worker install through `iii worker add harness`
+- worker install through `iii worker add harness`, with a core worker fallback
+  if the harness artifact cannot be installed
 - run control through `run::start` and `run::start_and_wait`
 - event streaming through `stream::list` over `agent::events`
 - credentials through `auth::set_token` and `auth::status`
@@ -46,18 +47,19 @@ iii-code setup
 ```
 
 `setup` verifies `iii --version`, installs/updates the worker stack with
-`iii worker add harness`, stores `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` through
-`auth::set_token`, then probes `harness::status`, `models::list`, and
-`auth::status`.
+`iii worker add harness`, falls back to installing the core worker dependencies
+from the same registry if harness installation fails, stores `OPENAI_API_KEY`
+and `ANTHROPIC_API_KEY` through `auth::set_token`, then probes
+`harness::status`, `models::list`, and `auth::status`.
 
 Secrets are intentionally not accepted through CLI flags because argv can leak
 through process listings and error logs.
 
 Current upstream note: a fresh `iii worker add harness` resolves the dependency
 graph but fails on the final `harness` binary SHA256 check in the public worker
-registry. `iii-code setup` intentionally stops there instead of reconstructing
-the stack locally. Once the registry artifact is fixed upstream, setup should
-work without changing `iii-code`.
+registry. `iii-code setup` logs that error and installs the core dependency
+stack from the same public registry so the CLI can still be exercised while the
+harness artifact is fixed upstream.
 
 ## Run
 

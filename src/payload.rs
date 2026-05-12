@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -31,19 +31,52 @@ pub fn new_session_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-pub fn resolve_provider_model(provider: Option<&str>, model: Option<&str>) -> (String, String) {
-    let provider = provider.unwrap_or(DEFAULT_PROVIDER).to_string();
-    let model = model
-        .map(ToString::to_string)
-        .unwrap_or_else(|| default_model_for(&provider).to_string());
-    (provider, model)
+pub fn resolve_provider_model(
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(String, String)> {
+    let provider = provider.unwrap_or(DEFAULT_PROVIDER);
+    validate_provider(provider)?;
+
+    let model = match model {
+        Some(model) => {
+            validate_model_for_provider(provider, model)?;
+            model.to_string()
+        }
+        None => default_model_for(provider)?.to_string(),
+    };
+
+    Ok((provider.to_string(), model))
 }
 
-pub fn default_model_for(provider: &str) -> &'static str {
+pub fn default_model_for(provider: &str) -> Result<&'static str> {
     match provider {
-        "openai" => DEFAULT_OPENAI_MODEL,
-        _ => DEFAULT_ANTHROPIC_MODEL,
+        "openai" => Ok(DEFAULT_OPENAI_MODEL),
+        "anthropic" => Ok(DEFAULT_ANTHROPIC_MODEL),
+        _ => Err(anyhow!("unknown provider '{provider}'")),
     }
+}
+
+fn validate_provider(provider: &str) -> Result<()> {
+    match provider {
+        "openai" | "anthropic" => Ok(()),
+        _ => Err(anyhow!("unknown provider '{provider}'")),
+    }
+}
+
+fn validate_model_for_provider(provider: &str, model: &str) -> Result<()> {
+    let normalized = model.to_ascii_lowercase();
+    if provider == "anthropic" && normalized.starts_with("gpt") {
+        return Err(anyhow!(
+            "model '{model}' is not compatible with provider 'anthropic'"
+        ));
+    }
+    if provider == "openai" && normalized.starts_with("claude-") {
+        return Err(anyhow!(
+            "model '{model}' is not compatible with provider 'openai'"
+        ));
+    }
+    Ok(())
 }
 
 pub fn current_cwd_metadata() -> Result<(String, String)> {
@@ -137,16 +170,37 @@ mod tests {
 
     #[test]
     fn defaults_to_anthropic_sonnet() {
-        let (provider, model) = resolve_provider_model(None, None);
+        let (provider, model) = resolve_provider_model(None, None).unwrap();
         assert_eq!(provider, "anthropic");
         assert_eq!(model, DEFAULT_ANTHROPIC_MODEL);
     }
 
     #[test]
     fn openai_defaults_to_gpt_5() {
-        let (provider, model) = resolve_provider_model(Some("openai"), None);
+        let (provider, model) = resolve_provider_model(Some("openai"), None).unwrap();
         assert_eq!(provider, "openai");
         assert_eq!(model, DEFAULT_OPENAI_MODEL);
+    }
+
+    #[test]
+    fn rejects_unknown_provider() {
+        let err = resolve_provider_model(Some("bedrock"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown provider"));
+    }
+
+    #[test]
+    fn rejects_provider_model_mismatch() {
+        let anthropic_err = resolve_provider_model(Some("anthropic"), Some("gpt-5"))
+            .unwrap_err()
+            .to_string();
+        assert!(anthropic_err.contains("not compatible"));
+
+        let openai_err = resolve_provider_model(Some("openai"), Some("claude-sonnet-4-6"))
+            .unwrap_err()
+            .to_string();
+        assert!(openai_err.contains("not compatible"));
     }
 
     #[test]

@@ -42,9 +42,16 @@ fn setup<R: CommandRunner, W: Write>(
 
     if !args.skip_worker_add {
         writeln!(out, "installing harness worker stack")?;
-        let install = client
-            .worker_add_harness()
-            .context("install harness worker stack")?;
+        let install = match client.worker_add_harness() {
+            Ok(install) => install,
+            Err(err) => {
+                writeln!(out, "harness install failed; installing core worker stack")?;
+                writeln!(out, "{err}")?;
+                client
+                    .worker_add_core()
+                    .context("install core worker stack fallback")?
+            }
+        };
         if !install.trim().is_empty() {
             writeln!(out, "{install}")?;
         }
@@ -87,7 +94,8 @@ fn run_session<R: CommandRunner, W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let session_id = new_session_id();
-    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref());
+    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref())
+        .context("resolve provider/model")?;
     let (cwd, cwd_hash) = current_cwd_metadata()?;
     let payload = build_run_payload(&RunPayloadParams {
         session_id: session_id.clone(),
@@ -119,7 +127,8 @@ fn resume_session<R: CommandRunner, W: Write>(
     args: ResumeArgs,
     out: &mut W,
 ) -> Result<()> {
-    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref());
+    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref())
+        .context("resolve provider/model")?;
     let (cwd, cwd_hash) = current_cwd_metadata()?;
     let payload = build_run_payload(&RunPayloadParams {
         session_id: args.session_id.clone(),
@@ -307,13 +316,18 @@ fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) 
     trigger_with_retry(client, "models::list", json!({}), 5_000, "models::list")?;
     writeln!(out, "ok models::list")?;
     for provider in ["openai", "anthropic"] {
-        trigger_with_retry(
+        let value = trigger_with_retry(
             client,
             "auth::status",
             build_auth_status_payload(provider),
             5_000,
             &format!("auth::status for {provider}"),
         )?;
+        if let Some(failure) =
+            probe_failure_from_value(&format!("auth::status {provider}"), "auth::status", &value)
+        {
+            return Err(anyhow!("{} failed: {}", failure.label, failure.error));
+        }
         writeln!(out, "ok auth::status {provider}")?;
     }
     Ok(())
@@ -381,7 +395,11 @@ fn report_probe<R: CommandRunner, W: Write>(
     payload: Value,
 ) -> Result<Option<ProbeFailure>> {
     match client.trigger(function_id, payload, DOCTOR_PROBE_TIMEOUT_MS) {
-        Ok(_) => {
+        Ok(value) => {
+            if let Some(failure) = probe_failure_from_value(label, function_id, &value) {
+                writeln!(out, "{label}: error: {}", failure.error)?;
+                return Ok(Some(failure));
+            }
             writeln!(out, "{label}: ok")?;
             Ok(None)
         }
@@ -393,6 +411,19 @@ fn report_probe<R: CommandRunner, W: Write>(
                 error,
             }))
         }
+    }
+}
+
+fn probe_failure_from_value(label: &str, function_id: &str, value: &Value) -> Option<ProbeFailure> {
+    if function_id == "auth::status"
+        && value.get("configured").and_then(Value::as_bool) == Some(false)
+    {
+        Some(ProbeFailure {
+            label: label.to_string(),
+            error: "not configured".to_string(),
+        })
+    } else {
+        None
     }
 }
 
@@ -536,13 +567,60 @@ mod tests {
     }
 
     #[test]
-    fn setup_fails_when_harness_add_fails() {
+    fn setup_falls_back_to_core_when_harness_add_fails() {
         let runner = MockRunner::new(vec![
             MockRunner::ok("0.11.6\n"),
             CommandOutput {
                 status: 1,
                 stdout: String::new(),
                 stderr: "checksum mismatch".into(),
+            },
+            MockRunner::ok("core installed\n"),
+        ]);
+        let cli = Cli::try_parse_from([
+            "iii-code",
+            "setup",
+            "--no-health-check",
+            "--ignore-env-credentials",
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert_eq!(
+            calls[1],
+            vec![
+                "worker".to_string(),
+                "add".to_string(),
+                "harness".to_string()
+            ]
+        );
+        assert_eq!(calls.len(), 3);
+        assert!(calls[2].contains(&"--no-wait".to_string()));
+        assert!(calls[2].contains(&"turn-orchestrator".to_string()));
+        assert!(calls[2].contains(&"provider-openai".to_string()));
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("harness install failed"));
+        assert!(text.contains("checksum mismatch"));
+        assert!(text.contains("core installed"));
+    }
+
+    #[test]
+    fn setup_returns_error_when_core_fallback_fails() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "harness mismatch".into(),
+            },
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "core failed".into(),
             },
         ]);
         let cli = Cli::try_parse_from([
@@ -554,19 +632,11 @@ mod tests {
         .unwrap();
         let mut out = Vec::new();
 
-        let err = run(cli, &runner, &mut out).unwrap_err().to_string();
+        let err = run(cli, &runner, &mut out).unwrap_err();
+        let details = format!("{err:#}");
 
-        let calls = runner.calls.borrow();
-        assert_eq!(
-            calls[1],
-            vec![
-                "worker".to_string(),
-                "add".to_string(),
-                "harness".to_string()
-            ]
-        );
-        assert_eq!(calls.len(), 2);
-        assert!(err.contains("install harness worker stack"));
+        assert!(details.contains("install core worker stack fallback"));
+        assert!(details.contains("core failed"));
     }
 
     #[test]
@@ -592,9 +662,11 @@ mod tests {
         assert!(text.contains("harness: ok"));
         assert!(text.contains("models: error"));
         assert!(text.contains("openai auth: ok"));
-        assert!(text.contains("anthropic auth: ok"));
+        assert!(text.contains("anthropic auth: error: not configured"));
         assert!(err.contains("doctor probes failed"));
         assert!(err.contains("models"));
+        assert!(err.contains("anthropic auth"));
+        assert!(err.contains("not configured"));
     }
 
     #[test]
@@ -612,6 +684,22 @@ mod tests {
 
         assert!(text.contains("harness::status: error"));
         assert!(err.contains("harness::status failed"));
+    }
+
+    #[test]
+    fn health_probe_fails_when_auth_status_is_unconfigured() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":false}"#),
+        ]);
+        let client = IiiClient::new(&runner, "127.0.0.1", 49134);
+        let mut out = Vec::new();
+
+        let err = health_probe(&client, &mut out).unwrap_err().to_string();
+
+        assert!(err.contains("auth::status openai failed"));
+        assert!(err.contains("not configured"));
     }
 
     #[test]
