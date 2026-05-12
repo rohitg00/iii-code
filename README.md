@@ -4,6 +4,29 @@
 loop on top of the installed `iii` engine. It does not embed a second agent
 runtime, and does not keep its own secrets store.
 
+The default command opens a terminal harness shell:
+
+```bash
+iii-code
+iii-code chat "inspect this repo and find the next fix"
+```
+
+Inside the shell, regular text sends a new user turn. Slash commands expose the
+same worker-backed controls as the browser harness:
+
+```text
+/sessions
+/messages [session-id]
+/functions [filter]
+/workers
+/approvals
+/allow <function-call-id>
+/deny <function-call-id> [reason]
+/repair
+/fork <entry-id>
+/doctor
+```
+
 The boundary is the public `iii` CLI and worker functions:
 
 - worker install through `iii worker add harness`, with a core worker fallback
@@ -12,8 +35,8 @@ The boundary is the public `iii` CLI and worker functions:
 - event streaming through `stream::list` over `agent::events`
 - credentials through `auth::set_token` and `auth::status`
 - model discovery through `models::list`
-- session listing through `state::list` over the `agent` scope and `session/`
-  prefix
+- session discovery, transcript loading, fork, and repair through
+  `session-tree::*`, with legacy state fallback where needed
 - abort through `router::abort`
 - worker and function discovery through `engine::*::list`
 - direct calls into any worker through `iii-code call`
@@ -87,16 +110,31 @@ harness artifact is fixed upstream.
 
 ## Run
 
+Open the interactive shell:
+
+```bash
+iii-code
+```
+
+Or start with a prompt:
+
+```bash
+iii-code chat "inspect this repo and suggest the first cleanup"
+```
+
+For scripts, call one turn directly:
+
 ```bash
 iii-code run "inspect this repo and suggest the first cleanup"
 ```
 
 By default, `iii-code` starts a durable `run::start` session and polls
 `stream::list` for new `agent::events` frames. It prints the session id so you
-can resume:
+can continue from the same transcript:
 
 ```bash
 iii-code resume <session-id>
+iii-code resume <session-id> "continue from there and make the change"
 ```
 
 Override provider/model when needed:
@@ -112,6 +150,9 @@ Use existing worker controls when you need more of the harness behavior:
 iii-code run "edit src/main.rs" --approval-required shell::fs::write
 iii-code run "run the node test suite" --image node
 iii-code sessions
+iii-code messages <session-id>
+iii-code fork <session-id> <entry-id>
+iii-code repair <session-id>
 iii-code abort <session-id>
 ```
 
@@ -196,7 +237,7 @@ iii-code models
 Fresh upstream references were cloned from:
 
 - `https://github.com/iii-hq/iii` at `3512ada`
-- `https://github.com/iii-hq/workers` at `90fc9fe`
+- `https://github.com/iii-hq/workers` at `ee90c51`
 
 The CLI intentionally depends on the installed `iii` binary rather than local
 checkout paths.

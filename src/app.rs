@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -9,42 +9,60 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     AbortArgs, ApprovalDenyArgs, ApprovalResolveArgs, ApprovalsArgs, ApprovalsCommand,
-    ApprovalsListArgs, CallArgs, Cli, Command, FunctionsArgs, ModelsArgs, ResumeArgs, RunArgs,
-    SandboxArgs, SandboxCommand, SandboxCreateArgs, SandboxExecArgs, SandboxStopArgs, SessionsArgs,
-    SetupArgs, StateArgs, StateCommand, StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs,
-    StreamArgs, StreamCommand, WorkersArgs,
+    ApprovalsListArgs, CallArgs, ChatArgs, Cli, Command, ForkArgs, FunctionsArgs, MessagesArgs,
+    ModelsArgs, RepairArgs, ResumeArgs, RunArgs, SandboxArgs, SandboxCommand, SandboxCreateArgs,
+    SandboxExecArgs, SandboxStopArgs, SessionsArgs, SetupArgs, StateArgs, StateCommand,
+    StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs, StreamArgs, StreamCommand,
+    WorkersArgs,
 };
 use crate::events::{is_agent_end, normalize_stream_item, render_event, render_final_messages};
 use crate::iii::{CommandRunner, IiiClient};
 use crate::payload::{
     RunPayloadParams, SandboxCreatePayloadParams, build_abort_payload, build_approval_list_payload,
     build_approval_resolve_payload, build_auth_payload, build_auth_status_payload,
-    build_connected_workers_payload, build_functions_payload, build_models_payload,
-    build_run_payload, build_sandbox_create_payload, build_sandbox_exec_payload,
-    build_sandbox_stop_payload, build_sessions_payload, build_state_get_payload,
-    build_state_list_payload, build_state_set_payload, build_stream_list_payload,
-    build_stream_list_payload_for, current_cwd_metadata, new_session_id, resolve_provider_model,
+    build_connected_workers_payload, build_functions_payload, build_legacy_sessions_payload,
+    build_models_payload, build_run_payload, build_sandbox_create_payload,
+    build_sandbox_exec_payload, build_sandbox_stop_payload, build_session_fork_payload,
+    build_session_messages_payload, build_session_reconcile_payload, build_sessions_payload,
+    build_state_get_payload, build_state_list_payload, build_state_set_payload,
+    build_stream_list_payload, build_stream_list_payload_for, build_user_message,
+    current_cwd_metadata, new_session_id, resolve_provider_model,
 };
 
 const DOCTOR_PROBE_TIMEOUT_MS: u64 = 1_000;
 
+#[cfg(test)]
 pub fn run<R: CommandRunner, W: Write>(cli: Cli, runner: R, out: &mut W) -> Result<()> {
+    run_with_input(cli, runner, std::io::empty(), out)
+}
+
+pub fn run_with_input<R: CommandRunner, I: BufRead, W: Write>(
+    cli: Cli,
+    runner: R,
+    input: I,
+    out: &mut W,
+) -> Result<()> {
     let client = IiiClient::new(runner, cli.address, cli.port);
     match cli.command {
-        Command::Setup(args) => setup(&client, args, out),
-        Command::Run(args) => run_session(&client, args, out),
-        Command::Resume(args) => resume_session(&client, args, out),
-        Command::Sessions(args) => sessions(&client, args, out),
-        Command::Abort(args) => abort_session(&client, args, out),
-        Command::Doctor => doctor(&client, out),
-        Command::Models(args) => models(&client, args, out),
-        Command::Workers(args) => workers(&client, args, out),
-        Command::Functions(args) => functions(&client, args, out),
-        Command::Call(args) => call_function(&client, args, out),
-        Command::State(args) => state(&client, args, out),
-        Command::Stream(args) => stream(&client, args, out),
-        Command::Approvals(args) => approvals(&client, args, out),
-        Command::Sandbox(args) => sandbox(&client, args, out),
+        None => chat(&client, ChatArgs::default(), input, out),
+        Some(Command::Chat(args)) => chat(&client, args, input, out),
+        Some(Command::Setup(args)) => setup(&client, args, out),
+        Some(Command::Run(args)) => run_session(&client, args, out),
+        Some(Command::Resume(args)) => resume_session(&client, args, out),
+        Some(Command::Sessions(args)) => sessions(&client, args, out),
+        Some(Command::Messages(args)) => messages(&client, args, out),
+        Some(Command::Fork(args)) => fork_session(&client, args, out),
+        Some(Command::Repair(args)) => repair_session(&client, args, out),
+        Some(Command::Abort(args)) => abort_session(&client, args, out),
+        Some(Command::Doctor) => doctor(&client, out),
+        Some(Command::Models(args)) => models(&client, args, out),
+        Some(Command::Workers(args)) => workers(&client, args, out),
+        Some(Command::Functions(args)) => functions(&client, args, out),
+        Some(Command::Call(args)) => call_function(&client, args, out),
+        Some(Command::State(args)) => state(&client, args, out),
+        Some(Command::Stream(args)) => stream(&client, args, out),
+        Some(Command::Approvals(args)) => approvals(&client, args, out),
+        Some(Command::Sandbox(args)) => sandbox(&client, args, out),
     }
 }
 
@@ -110,30 +128,12 @@ fn run_session<R: CommandRunner, W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let session_id = new_session_id();
-    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref())
-        .context("resolve provider/model")?;
-    let (cwd, cwd_hash) = current_cwd_metadata()?;
-    let payload = build_run_payload(&RunPayloadParams {
-        session_id: session_id.clone(),
-        prompt: Some(args.prompt),
-        provider,
-        model,
-        system_prompt: args.system_prompt,
-        approval_required: args.approval_required,
-        image: args.image,
-        idle_timeout_secs: args.idle_timeout_secs,
-        max_turns: args.max_turns,
-        cwd,
-        cwd_hash,
-    });
-
-    execute_run(
+    let config = RunConfig::from_run_args(&args)?;
+    start_session(
         client,
         &session_id,
-        payload,
-        args.wait,
-        args.poll_interval_ms,
-        args.stream_timeout_ms,
+        vec![build_user_message(&args.prompt)],
+        &config,
         out,
     )
 }
@@ -143,30 +143,140 @@ fn resume_session<R: CommandRunner, W: Write>(
     args: ResumeArgs,
     out: &mut W,
 ) -> Result<()> {
-    let (provider, model) = resolve_provider_model(args.provider.as_deref(), args.model.as_deref())
-        .context("resolve provider/model")?;
+    let config = RunConfig::from_resume_args(&args)?;
+    let mut messages = load_session_messages(client, &args.session_id)
+        .with_context(|| format!("load session {} transcript", args.session_id))?;
+    if let Some(prompt) = &args.prompt {
+        messages.push(build_user_message(prompt));
+    }
+    if messages.is_empty() {
+        return Err(anyhow!(
+            "no persisted transcript found for {}; pass a prompt or repair the session tree",
+            args.session_id
+        ));
+    }
+    start_session(client, &args.session_id, messages, &config, out)
+}
+
+#[derive(Debug, Clone)]
+struct RunConfig {
+    provider: String,
+    model: String,
+    system_prompt: Option<String>,
+    approval_required: Vec<String>,
+    image: String,
+    idle_timeout_secs: u32,
+    max_turns: u32,
+    wait: bool,
+    poll_interval_ms: u64,
+    stream_timeout_ms: u64,
+}
+
+impl RunConfig {
+    fn from_run_args(args: &RunArgs) -> Result<Self> {
+        Self::new(
+            args.provider.as_deref(),
+            args.model.as_deref(),
+            args.system_prompt.clone(),
+            args.approval_required.clone(),
+            args.image.clone(),
+            args.idle_timeout_secs,
+            args.max_turns,
+            args.wait,
+            args.poll_interval_ms,
+            args.stream_timeout_ms,
+        )
+    }
+
+    fn from_resume_args(args: &ResumeArgs) -> Result<Self> {
+        Self::new(
+            args.provider.as_deref(),
+            args.model.as_deref(),
+            args.system_prompt.clone(),
+            args.approval_required.clone(),
+            args.image.clone(),
+            args.idle_timeout_secs,
+            args.max_turns,
+            args.wait,
+            args.poll_interval_ms,
+            args.stream_timeout_ms,
+        )
+    }
+
+    fn from_chat_args(args: &ChatArgs) -> Result<Self> {
+        Self::new(
+            args.provider.as_deref(),
+            args.model.as_deref(),
+            args.system_prompt.clone(),
+            args.approval_required.clone(),
+            args.image.clone(),
+            args.idle_timeout_secs,
+            args.max_turns,
+            args.wait,
+            args.poll_interval_ms,
+            args.stream_timeout_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        provider: Option<&str>,
+        model: Option<&str>,
+        system_prompt: Option<String>,
+        approval_required: Vec<String>,
+        image: String,
+        idle_timeout_secs: u32,
+        max_turns: u32,
+        wait: bool,
+        poll_interval_ms: u64,
+        stream_timeout_ms: u64,
+    ) -> Result<Self> {
+        let (provider, model) =
+            resolve_provider_model(provider, model).context("resolve provider/model")?;
+        Ok(Self {
+            provider,
+            model,
+            system_prompt,
+            approval_required,
+            image,
+            idle_timeout_secs,
+            max_turns,
+            wait,
+            poll_interval_ms,
+            stream_timeout_ms,
+        })
+    }
+}
+
+fn start_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    session_id: &str,
+    messages: Vec<Value>,
+    config: &RunConfig,
+    out: &mut W,
+) -> Result<()> {
     let (cwd, cwd_hash) = current_cwd_metadata()?;
     let payload = build_run_payload(&RunPayloadParams {
-        session_id: args.session_id.clone(),
-        prompt: None,
-        provider,
-        model,
-        system_prompt: args.system_prompt,
-        approval_required: args.approval_required,
-        image: args.image,
-        idle_timeout_secs: args.idle_timeout_secs,
-        max_turns: args.max_turns,
+        session_id: session_id.to_string(),
+        messages,
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        system_prompt: config.system_prompt.clone(),
+        approval_required: config.approval_required.clone(),
+        image: config.image.clone(),
+        idle_timeout_secs: config.idle_timeout_secs,
+        max_turns: config.max_turns,
         cwd,
         cwd_hash,
     });
 
     execute_run(
         client,
-        &args.session_id,
+        session_id,
         payload,
-        args.wait,
-        args.poll_interval_ms,
-        args.stream_timeout_ms,
+        config.wait,
+        config.poll_interval_ms,
+        config.stream_timeout_ms,
         out,
     )
 }
@@ -249,15 +359,319 @@ fn stream_events<R: CommandRunner, W: Write>(
     Ok(())
 }
 
+fn chat<R: CommandRunner, I: BufRead, W: Write>(
+    client: &IiiClient<R>,
+    args: ChatArgs,
+    mut input: I,
+    out: &mut W,
+) -> Result<()> {
+    let config = RunConfig::from_chat_args(&args)?;
+    let mut session_id = args.session_id.unwrap_or_else(new_session_id);
+
+    writeln!(out, "iii-code")?;
+    writeln!(out, "session: {session_id}")?;
+    writeln!(out, "model: {}/{}", config.provider, config.model)?;
+    writeln!(out, "sandbox: {}", config.image)?;
+    writeln!(out, "type /help for commands, /quit to exit")?;
+
+    if let Some(prompt) = args.prompt {
+        send_chat_prompt(client, &session_id, &prompt, &config, out)?;
+    }
+
+    let mut line = String::new();
+    loop {
+        write!(out, "iii-code> ")?;
+        out.flush()?;
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(next_session_id) = handle_chat_command(client, text, &session_id, out)? {
+            if next_session_id == "__quit__" {
+                break;
+            }
+            session_id = next_session_id;
+            continue;
+        }
+        send_chat_prompt(client, &session_id, text, &config, out)?;
+    }
+
+    writeln!(out, "session: {session_id}")?;
+    Ok(())
+}
+
+fn send_chat_prompt<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    session_id: &str,
+    prompt: &str,
+    config: &RunConfig,
+    out: &mut W,
+) -> Result<()> {
+    let mut messages = load_session_messages(client, session_id).unwrap_or_default();
+    messages.push(build_user_message(prompt));
+    start_session(client, session_id, messages, config, out)
+}
+
+fn handle_chat_command<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    text: &str,
+    session_id: &str,
+    out: &mut W,
+) -> Result<Option<String>> {
+    if !text.starts_with('/') {
+        return Ok(None);
+    }
+
+    let without_slash = text.trim_start_matches('/');
+    let mut parts = without_slash.splitn(2, char::is_whitespace);
+    let command = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+
+    match command {
+        "q" | "quit" | "exit" => Ok(Some("__quit__".to_string())),
+        "help" => {
+            print_chat_help(out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "new" => {
+            let next = new_session_id();
+            writeln!(out, "session: {next}")?;
+            Ok(Some(next))
+        }
+        "resume" => {
+            if rest.is_empty() {
+                writeln!(out, "usage: /resume <session-id>")?;
+                return Ok(Some(session_id.to_string()));
+            }
+            writeln!(out, "session: {rest}")?;
+            Ok(Some(rest.to_string()))
+        }
+        "sessions" => {
+            sessions(client, SessionsArgs { limit: 20 }, out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "messages" => {
+            let target = if rest.is_empty() { session_id } else { rest };
+            print_transcript(client, target, out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "models" => {
+            models(client, ModelsArgs { provider: None }, out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "workers" => {
+            workers(
+                client,
+                WorkersArgs {
+                    connected: true,
+                    worker_id: None,
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "functions" => {
+            functions(
+                client,
+                FunctionsArgs {
+                    include_internal: false,
+                    filter: if rest.is_empty() {
+                        None
+                    } else {
+                        Some(rest.to_string())
+                    },
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "approvals" => {
+            approvals(
+                client,
+                ApprovalsArgs {
+                    command: ApprovalsCommand::List(ApprovalsListArgs {
+                        session_id: Some(session_id.to_string()),
+                    }),
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "allow" => {
+            if rest.is_empty() {
+                writeln!(out, "usage: /allow <function-call-id>")?;
+            } else {
+                approvals(
+                    client,
+                    ApprovalsArgs {
+                        command: ApprovalsCommand::Allow(ApprovalResolveArgs {
+                            session_id: session_id.to_string(),
+                            function_call_id: rest.to_string(),
+                        }),
+                    },
+                    out,
+                )?;
+            }
+            Ok(Some(session_id.to_string()))
+        }
+        "deny" => {
+            let mut deny_parts = rest.splitn(2, char::is_whitespace);
+            let call_id = deny_parts.next().unwrap_or("");
+            if call_id.is_empty() {
+                writeln!(out, "usage: /deny <function-call-id> [reason]")?;
+            } else {
+                approvals(
+                    client,
+                    ApprovalsArgs {
+                        command: ApprovalsCommand::Deny(ApprovalDenyArgs {
+                            session_id: session_id.to_string(),
+                            function_call_id: call_id.to_string(),
+                            reason: deny_parts
+                                .next()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                        }),
+                    },
+                    out,
+                )?;
+            }
+            Ok(Some(session_id.to_string()))
+        }
+        "repair" => {
+            repair_session(
+                client,
+                RepairArgs {
+                    session_id: session_id.to_string(),
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "fork" => {
+            if rest.is_empty() {
+                writeln!(out, "usage: /fork <entry-id>")?;
+                return Ok(Some(session_id.to_string()));
+            }
+            let value = client
+                .trigger(
+                    "session-tree::fork",
+                    build_session_fork_payload(session_id, rest),
+                    5_000,
+                )
+                .context("fork session")?;
+            let next = value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            print_json(&value, out)?;
+            Ok(Some(next.unwrap_or_else(|| session_id.to_string())))
+        }
+        "doctor" => {
+            doctor(client, out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        _ => {
+            writeln!(out, "unknown command: /{command}")?;
+            Ok(Some(session_id.to_string()))
+        }
+    }
+}
+
+fn print_chat_help<W: Write>(out: &mut W) -> Result<()> {
+    writeln!(out, "/new")?;
+    writeln!(out, "/resume <session-id>")?;
+    writeln!(out, "/sessions")?;
+    writeln!(out, "/messages [session-id]")?;
+    writeln!(out, "/functions [filter]")?;
+    writeln!(out, "/workers")?;
+    writeln!(out, "/models")?;
+    writeln!(out, "/approvals")?;
+    writeln!(out, "/allow <function-call-id>")?;
+    writeln!(out, "/deny <function-call-id> [reason]")?;
+    writeln!(out, "/repair")?;
+    writeln!(out, "/fork <entry-id>")?;
+    writeln!(out, "/doctor")?;
+    writeln!(out, "/quit")?;
+    Ok(())
+}
+
 fn sessions<R: CommandRunner, W: Write>(
     client: &IiiClient<R>,
     args: SessionsArgs,
     out: &mut W,
 ) -> Result<()> {
     let value = client
-        .trigger("state::list", build_sessions_payload(), 5_000)
-        .context("list persisted run sessions")?;
+        .trigger(
+            "session-tree::list",
+            build_sessions_payload(args.limit),
+            5_000,
+        )
+        .or_else(|_| {
+            client
+                .trigger("state::list", build_legacy_sessions_payload(), 5_000)
+                .context("list legacy persisted run sessions")
+        })?;
     print_sessions(&value, args.limit, out)
+}
+
+fn messages<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: MessagesArgs,
+    out: &mut W,
+) -> Result<()> {
+    if args.raw {
+        let value = client
+            .trigger(
+                "session-tree::messages",
+                build_session_messages_payload(&args.session_id),
+                5_000,
+            )
+            .context("load session messages")?;
+        return print_json(&value, out);
+    }
+    print_transcript(client, &args.session_id, out)
+}
+
+fn fork_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: ForkArgs,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "session-tree::fork",
+            build_session_fork_payload(&args.session_id, &args.entry_id),
+            5_000,
+        )
+        .context("fork session")?;
+    print_json(&value, out)
+}
+
+fn repair_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: RepairArgs,
+    out: &mut W,
+) -> Result<()> {
+    let state_snapshot = client
+        .trigger(
+            "state::get",
+            build_state_get_payload("agent", &format!("session/{}/messages", args.session_id)),
+            5_000,
+        )
+        .context("load legacy session messages")?;
+    let value = client
+        .trigger(
+            "session-tree::reconcile",
+            build_session_reconcile_payload(&args.session_id, state_snapshot),
+            5_000,
+        )
+        .context("repair session tree")?;
+    print_json(&value, out)
 }
 
 fn abort_session<R: CommandRunner, W: Write>(
@@ -452,39 +866,126 @@ fn format_probe_failures(failures: &[ProbeFailure]) -> String {
 }
 
 fn print_sessions<W: Write>(value: &Value, limit: usize, out: &mut W) -> Result<()> {
-    let mut rows = value
-        .as_array()
+    let source = value
+        .get("sessions")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    let mut rows = source
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|item| {
             let session_id = item.get("session_id").and_then(Value::as_str)?;
-            let state = item
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let turn_count = item.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
-            let updated_at_ms = item
-                .get("updated_at_ms")
+            let state = item.get("state").and_then(Value::as_str).unwrap_or("tree");
+            let turn_count = item
+                .get("turn_count")
+                .or_else(|| item.get("entry_count"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let updated_at_ms = item
+                .get("updated_at_ms")
+                .or_else(|| item.get("updated_at"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let summary = item
+                .get("last_message_summary")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             Some((
                 session_id.to_string(),
                 state.to_string(),
                 turn_count,
                 updated_at_ms,
+                summary.to_string(),
             ))
         })
         .collect::<Vec<_>>();
     rows.sort_by_key(|row| std::cmp::Reverse(row.3));
 
-    for (session_id, state, turn_count, updated_at_ms) in rows.into_iter().take(limit) {
+    for (session_id, state, turn_count, updated_at_ms, summary) in rows.into_iter().take(limit) {
         writeln!(
             out,
-            "{session_id}\t{state}\tturns={turn_count}\tupdated={updated_at_ms}"
+            "{session_id}\t{state}\tentries={turn_count}\tupdated={updated_at_ms}\t{summary}"
         )?;
     }
     Ok(())
+}
+
+fn load_session_messages<R: CommandRunner>(
+    client: &IiiClient<R>,
+    session_id: &str,
+) -> Result<Vec<Value>> {
+    if let Ok(value) = client.trigger(
+        "session-tree::messages",
+        build_session_messages_payload(session_id),
+        5_000,
+    ) {
+        let messages = extract_session_messages(&value);
+        if !messages.is_empty() {
+            return Ok(messages);
+        }
+    }
+
+    let value = client
+        .trigger(
+            "state::get",
+            build_state_get_payload("agent", &format!("session/{session_id}/messages")),
+            5_000,
+        )
+        .context("load legacy session messages")?;
+    Ok(extract_session_messages(&value))
+}
+
+fn extract_session_messages(value: &Value) -> Vec<Value> {
+    let source = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    source
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.get("message").cloned().unwrap_or(item))
+        .collect()
+}
+
+fn print_transcript<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    session_id: &str,
+    out: &mut W,
+) -> Result<()> {
+    let messages = load_session_messages(client, session_id)?;
+    if messages.is_empty() {
+        writeln!(out, "no messages for {session_id}")?;
+        return Ok(());
+    }
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        if let Some(text) = message_plain_text(&message) {
+            writeln!(out, "{role}:\n{text}")?;
+        } else {
+            writeln!(out, "{role}: {}", serde_json::to_string(&message)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn message_plain_text(message: &Value) -> Option<String> {
+    let content = message.get("content")?.as_array()?;
+    let mut parts = Vec::new();
+    for block in content {
+        if let Some(text) = block.get("text").and_then(Value::as_str) {
+            parts.push(text.to_string());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(""))
+    }
 }
 
 fn models<R: CommandRunner, W: Write>(
@@ -763,7 +1264,7 @@ fn json_arg(payload: Option<&str>, payload_file: Option<&std::path::PathBuf>) ->
 }
 
 fn parse_json_value(input: &str) -> Result<Value> {
-    serde_json::from_str(input).with_context(|| format!("invalid JSON: {input}"))
+    serde_json::from_str(input).context("invalid JSON")
 }
 
 fn print_json<W: Write>(value: &Value, out: &mut W) -> Result<()> {
@@ -1011,6 +1512,41 @@ mod tests {
         let calls = runner.calls.borrow();
         assert!(calls[0].contains(&"router::abort".to_string()));
         assert!(calls[0].contains(&json!({"session_id":"s1"}).to_string()));
+    }
+
+    #[test]
+    fn resume_with_prompt_preserves_session_tree_messages() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok(
+                r#"{"messages":[{"entry_id":"e1","message":{"role":"user","content":[{"type":"text","text":"old"}],"timestamp":1}}]}"#,
+            ),
+            MockRunner::ok(r#"{"session_id":"s1"}"#),
+            MockRunner::ok(r#"[{"data":{"type":"agent_end"}}]"#),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "resume", "s1", "new"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert!(calls[0].contains(&"session-tree::messages".to_string()));
+        assert!(calls[1].contains(&"run::start".to_string()));
+        let payload = calls[1].join(" ");
+        assert!(payload.contains("old"));
+        assert!(payload.contains("new"));
+    }
+
+    #[test]
+    fn default_command_opens_chat_shell() {
+        let runner = MockRunner::new(vec![]);
+        let cli = Cli::try_parse_from(["iii-code"]).unwrap();
+        let mut out = Vec::new();
+
+        run_with_input(cli, &runner, "/quit\n".as_bytes(), &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("iii-code"));
+        assert!(text.contains("type /help"));
     }
 
     #[test]

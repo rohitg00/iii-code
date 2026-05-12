@@ -15,7 +15,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are iii-code, a power-user coding agent
 #[derive(Debug, Clone)]
 pub struct RunPayloadParams {
     pub session_id: String,
-    pub prompt: Option<String>,
+    pub messages: Vec<Value>,
     pub provider: String,
     pub model: String,
     pub system_prompt: Option<String>,
@@ -94,27 +94,26 @@ pub fn cwd_metadata(path: &Path) -> Result<(String, String)> {
 }
 
 pub fn build_run_payload(params: &RunPayloadParams) -> Value {
-    let mut messages = Vec::new();
-    if let Some(prompt) = &params.prompt {
-        messages.push(json!({
-            "role": "user",
-            "content": [{ "type": "text", "text": prompt }],
-            "timestamp": now_millis(),
-        }));
-    }
-
     json!({
         "session_id": params.session_id,
         "provider": params.provider,
         "model": params.model,
         "system_prompt": params.system_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM_PROMPT),
-        "messages": messages,
+        "messages": params.messages,
         "max_turns": params.max_turns,
         "approval_required": params.approval_required,
         "image": params.image,
         "cwd": params.cwd,
         "cwd_hash": params.cwd_hash,
         "idle_timeout_secs": params.idle_timeout_secs,
+    })
+}
+
+pub fn build_user_message(prompt: &str) -> Value {
+    json!({
+        "role": "user",
+        "content": [{ "type": "text", "text": prompt }],
+        "timestamp": now_millis(),
     })
 }
 
@@ -146,7 +145,14 @@ pub fn build_stream_list_payload(session_id: &str) -> Value {
     })
 }
 
-pub fn build_sessions_payload() -> Value {
+pub fn build_sessions_payload(limit: usize) -> Value {
+    json!({
+        "limit": limit,
+        "order": "desc",
+    })
+}
+
+pub fn build_legacy_sessions_payload() -> Value {
     json!({
         "scope": "agent",
         "prefix": "session/",
@@ -155,6 +161,24 @@ pub fn build_sessions_payload() -> Value {
 
 pub fn build_abort_payload(session_id: &str) -> Value {
     json!({ "session_id": session_id })
+}
+
+pub fn build_session_messages_payload(session_id: &str) -> Value {
+    json!({ "session_id": session_id })
+}
+
+pub fn build_session_fork_payload(session_id: &str, entry_id: &str) -> Value {
+    json!({
+        "source_session_id": session_id,
+        "from_entry_id": entry_id,
+    })
+}
+
+pub fn build_session_reconcile_payload(session_id: &str, state_snapshot: Value) -> Value {
+    json!({
+        "session_id": session_id,
+        "state_snapshot": state_snapshot,
+    })
 }
 
 pub fn build_functions_payload(include_internal: bool) -> Value {
@@ -327,7 +351,7 @@ mod tests {
     fn build_run_payload_has_user_message_and_cwd_hash() {
         let payload = build_run_payload(&RunPayloadParams {
             session_id: "s1".into(),
-            prompt: Some("hello".into()),
+            messages: vec![build_user_message("hello")],
             provider: "openai".into(),
             model: "gpt-5".into(),
             system_prompt: None,
@@ -351,9 +375,19 @@ mod tests {
 
     #[test]
     fn builds_session_helper_payloads() {
-        assert_eq!(build_sessions_payload()["scope"], "agent");
-        assert_eq!(build_sessions_payload()["prefix"], "session/");
+        assert_eq!(build_sessions_payload(20)["order"], "desc");
+        assert_eq!(build_legacy_sessions_payload()["scope"], "agent");
+        assert_eq!(build_legacy_sessions_payload()["prefix"], "session/");
         assert_eq!(build_abort_payload("s1")["session_id"], "s1");
+        assert_eq!(build_session_messages_payload("s1")["session_id"], "s1");
+        assert_eq!(
+            build_session_fork_payload("s1", "e1")["from_entry_id"],
+            "e1"
+        );
+        assert_eq!(
+            build_session_reconcile_payload("s1", json!([]))["state_snapshot"],
+            json!([])
+        );
     }
 
     #[test]

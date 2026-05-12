@@ -14,19 +14,30 @@ pub struct Cli {
     pub port: u16,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(
+        about = "Open the interactive terminal coding-agent shell",
+        alias = "tui"
+    )]
+    Chat(ChatArgs),
     #[command(about = "Install harness and store provider credentials")]
     Setup(SetupArgs),
     #[command(about = "Start a new durable coding session")]
     Run(RunArgs),
-    #[command(about = "Resume an existing durable session id")]
+    #[command(about = "Resume an existing durable session id, optionally with a new prompt")]
     Resume(ResumeArgs),
-    #[command(about = "List durable run sessions persisted by turn-orchestrator")]
+    #[command(about = "List durable sessions from session-tree")]
     Sessions(SessionsArgs),
+    #[command(about = "Print the active transcript for a session")]
+    Messages(MessagesArgs),
+    #[command(about = "Fork a session from a session-tree entry id")]
+    Fork(ForkArgs),
+    #[command(about = "Repair session-tree rows from legacy persisted messages")]
+    Repair(RepairArgs),
     #[command(about = "Abort a durable session through provider-router")]
     Abort(AbortArgs),
     #[command(about = "Print read-only diagnostics for the iii-code stack")]
@@ -59,6 +70,68 @@ pub struct SetupArgs {
 
     #[arg(long, hide = true)]
     pub ignore_env_credentials: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct ChatArgs {
+    #[arg(help = "Optional first prompt to send after opening the shell")]
+    pub prompt: Option<String>,
+
+    #[arg(long)]
+    pub session_id: Option<String>,
+
+    #[arg(long, env = "III_CODE_PROVIDER")]
+    pub provider: Option<String>,
+
+    #[arg(long, env = "III_CODE_MODEL")]
+    pub model: Option<String>,
+
+    #[arg(long)]
+    pub system_prompt: Option<String>,
+
+    #[arg(long = "approval-required")]
+    pub approval_required: Vec<String>,
+
+    #[arg(
+        long,
+        default_value = "python",
+        help = "Sandbox image for tool execution"
+    )]
+    pub image: String,
+
+    #[arg(long, default_value_t = 300)]
+    pub idle_timeout_secs: u32,
+
+    #[arg(long, default_value_t = 20)]
+    pub max_turns: u32,
+
+    #[arg(long, default_value_t = 750)]
+    pub poll_interval_ms: u64,
+
+    #[arg(long, default_value_t = 600_000)]
+    pub stream_timeout_ms: u64,
+
+    #[arg(long)]
+    pub wait: bool,
+}
+
+impl Default for ChatArgs {
+    fn default() -> Self {
+        Self {
+            prompt: None,
+            session_id: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            approval_required: Vec::new(),
+            image: "python".to_string(),
+            idle_timeout_secs: 300,
+            max_turns: 20,
+            poll_interval_ms: 750,
+            stream_timeout_ms: 600_000,
+            wait: false,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +179,9 @@ pub struct ResumeArgs {
     #[arg(help = "Existing iii agent session id")]
     pub session_id: String,
 
+    #[arg(help = "Optional follow-up prompt to append to the persisted transcript")]
+    pub prompt: Option<String>,
+
     #[arg(long, env = "III_CODE_PROVIDER")]
     pub provider: Option<String>,
 
@@ -145,6 +221,30 @@ pub struct ResumeArgs {
 pub struct SessionsArgs {
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct MessagesArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ForkArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+
+    #[arg(help = "session-tree entry id to fork from")]
+    pub entry_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RepairArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -374,7 +474,7 @@ mod tests {
         ])
         .unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run(args) => {
                 assert_eq!(args.prompt, "build tetris");
                 assert_eq!(args.provider.as_deref(), Some("openai"));
@@ -391,7 +491,7 @@ mod tests {
     fn parses_setup_without_secret_flags() {
         let cli = Cli::try_parse_from(["iii-code", "setup", "--no-health-check"]).unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Setup(args) => {
                 assert!(args.no_health_check);
             }
@@ -410,29 +510,65 @@ mod tests {
     #[test]
     fn parses_sessions_and_abort_commands() {
         let sessions = Cli::try_parse_from(["iii-code", "sessions", "--limit", "5"]).unwrap();
-        match sessions.command {
+        match sessions.command.unwrap() {
             Command::Sessions(args) => assert_eq!(args.limit, 5),
             _ => panic!("expected sessions command"),
         }
 
         let abort = Cli::try_parse_from(["iii-code", "abort", "s1"]).unwrap();
-        match abort.command {
+        match abort.command.unwrap() {
             Command::Abort(args) => assert_eq!(args.session_id, "s1"),
             _ => panic!("expected abort command"),
         }
     }
 
     #[test]
+    fn parses_default_and_chat_commands() {
+        let default_cli = Cli::try_parse_from(["iii-code"]).unwrap();
+        assert!(default_cli.command.is_none());
+
+        let chat = Cli::try_parse_from(["iii-code", "chat", "--session-id", "s1", "hi"]).unwrap();
+        match chat.command.unwrap() {
+            Command::Chat(args) => {
+                assert_eq!(args.session_id.as_deref(), Some("s1"));
+                assert_eq!(args.prompt.as_deref(), Some("hi"));
+            }
+            _ => panic!("expected chat command"),
+        }
+    }
+
+    #[test]
+    fn parses_resume_followup_and_session_tree_commands() {
+        let resume = Cli::try_parse_from(["iii-code", "resume", "s1", "continue"]).unwrap();
+        match resume.command.unwrap() {
+            Command::Resume(args) => assert_eq!(args.prompt.as_deref(), Some("continue")),
+            _ => panic!("expected resume command"),
+        }
+
+        let messages = Cli::try_parse_from(["iii-code", "messages", "s1", "--raw"]).unwrap();
+        match messages.command.unwrap() {
+            Command::Messages(args) => assert!(args.raw),
+            _ => panic!("expected messages command"),
+        }
+
+        let fork = Cli::try_parse_from(["iii-code", "fork", "s1", "e1"]).unwrap();
+        match fork.command.unwrap() {
+            Command::Fork(args) => assert_eq!(args.entry_id, "e1"),
+            _ => panic!("expected fork command"),
+        }
+    }
+
+    #[test]
     fn parses_worker_function_and_call_commands() {
         let workers = Cli::try_parse_from(["iii-code", "workers", "--connected"]).unwrap();
-        match workers.command {
+        match workers.command.unwrap() {
             Command::Workers(args) => assert!(args.connected),
             _ => panic!("expected workers command"),
         }
 
         let functions =
             Cli::try_parse_from(["iii-code", "functions", "--include-internal"]).unwrap();
-        match functions.command {
+        match functions.command.unwrap() {
             Command::Functions(args) => assert!(args.include_internal),
             _ => panic!("expected functions command"),
         }
@@ -445,7 +581,7 @@ mod tests {
             r#"{"provider":"openai"}"#,
         ])
         .unwrap();
-        match call.command {
+        match call.command.unwrap() {
             Command::Call(args) => assert_eq!(args.function_id, "models::list"),
             _ => panic!("expected call command"),
         }
@@ -454,7 +590,7 @@ mod tests {
     #[test]
     fn parses_state_approval_and_sandbox_commands() {
         let state = Cli::try_parse_from(["iii-code", "state", "get", "agent", "k"]).unwrap();
-        match state.command {
+        match state.command.unwrap() {
             Command::State(args) => match args.command {
                 StateCommand::Get(args) => assert_eq!(args.scope, "agent"),
                 _ => panic!("expected state get command"),
@@ -472,7 +608,7 @@ mod tests {
             "no",
         ])
         .unwrap();
-        match approval.command {
+        match approval.command.unwrap() {
             Command::Approvals(args) => match args.command {
                 ApprovalsCommand::Deny(args) => assert_eq!(args.reason.as_deref(), Some("no")),
                 _ => panic!("expected approval deny command"),
@@ -482,7 +618,7 @@ mod tests {
 
         let sandbox =
             Cli::try_parse_from(["iii-code", "sandbox", "exec", "sb1", "npm", "test"]).unwrap();
-        match sandbox.command {
+        match sandbox.command.unwrap() {
             Command::Sandbox(args) => match args.command {
                 SandboxCommand::Exec(args) => assert_eq!(args.args, vec!["test"]),
                 _ => panic!("expected sandbox exec command"),
