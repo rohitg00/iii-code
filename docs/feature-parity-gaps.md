@@ -29,6 +29,11 @@ It should not publish a competing harness or checked-in worker lockfile. If the
 harness artifact is temporarily unavailable, the CLI may install the same core
 workers from the public registry as a fallback.
 
+For a fuller coding profile, `iii-code setup --coding-full` additionally
+installs public registry workers `mcp`, `iii-lsp`, and `iii-database@1.0.4`.
+The CLI only installs and verifies that profile; the model still discovers
+usable functions from the running engine.
+
 ## Covered By Existing Workers
 
 - Run and resume: `run::start` and `run::start_and_wait` from
@@ -48,6 +53,9 @@ workers from the public registry as a fallback.
 
 - Setup uses `iii worker add harness` first, logs harness installation errors,
   and falls back to the core worker stack from the public registry.
+- `setup --coding-full` installs `mcp`, `iii-lsp`, and
+  `iii-database@1.0.4`; `doctor --coding-full` verifies those workers are
+  configured.
 - Provider credentials are read from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
   and stored through `auth::set_token`; argv secret flags are not supported.
 - `run` and `resume` construct the current `turn-orchestrator` payload,
@@ -64,6 +72,9 @@ workers from the public registry as a fallback.
 - `abort` calls `router::abort`.
 - `workers`, `functions`, and `call` expose the broader worker graph without
   adding worker-specific code to the CLI.
+- New sessions add first-turn client context that tells the model to inspect
+  installed workers, live functions, and skill docs instead of assuming a fixed
+  capability set.
 - `state` and `stream` expose shared engine primitives.
 - `approvals` lists and resolves `approval-gate` requests.
 - `sandbox` wraps the main `iii-sandbox` lifecycle and exec functions.
@@ -73,8 +84,9 @@ workers from the public registry as a fallback.
 
 Features that map cleanly to existing iii workers:
 
-- MCP and skills migration from Claude Code/OpenCode configs. This should be a
-  setup helper around existing worker/config surfaces, not a new agent runtime.
+- MCP server configuration import/export. The `mcp` worker is now part of the
+  optional coding profile; the missing piece is a setup helper around existing
+  worker config surfaces.
 - Model switching and model metadata. `models::list` is already the read path;
   the missing piece is better CLI formatting and defaults.
 - Permission presets. This should compile to `approval_required` values and

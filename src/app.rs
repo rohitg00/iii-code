@@ -9,14 +9,14 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     AbortArgs, ApprovalDenyArgs, ApprovalResolveArgs, ApprovalsArgs, ApprovalsCommand,
-    ApprovalsListArgs, CallArgs, ChatArgs, Cli, CloneArgs, Command, CompactArgs, ExportArgs,
-    ForkArgs, FunctionsArgs, MessagesArgs, ModelsArgs, RepairArgs, ResumeArgs, RunArgs,
+    ApprovalsListArgs, CallArgs, ChatArgs, Cli, CloneArgs, Command, CompactArgs, DoctorArgs,
+    ExportArgs, ForkArgs, FunctionsArgs, MessagesArgs, ModelsArgs, RepairArgs, ResumeArgs, RunArgs,
     SandboxArgs, SandboxCommand, SandboxCreateArgs, SandboxExecArgs, SandboxStopArgs, SessionsArgs,
     SetupArgs, StateArgs, StateCommand, StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs,
     StatusArgs, StreamArgs, StreamCommand, TreeArgs, WorkersArgs,
 };
 use crate::events::{is_agent_end, normalize_stream_item, render_event, render_final_messages};
-use crate::iii::{CommandRunner, IiiClient};
+use crate::iii::{CODING_FULL_WORKER_STACK, CommandRunner, IiiClient};
 use crate::payload::{
     RunPayloadParams, SandboxCreatePayloadParams, SessionCompactPayloadParams, build_abort_payload,
     build_approval_list_payload, build_approval_resolve_payload, build_auth_payload,
@@ -27,8 +27,8 @@ use crate::payload::{
     build_session_fork_payload, build_session_messages_payload, build_session_reconcile_payload,
     build_session_tree_payload, build_sessions_payload, build_state_get_payload,
     build_state_list_payload, build_state_set_payload, build_stream_list_payload,
-    build_stream_list_payload_for, build_user_message, current_cwd_metadata, new_session_id,
-    resolve_provider_model,
+    build_stream_list_payload_for, build_user_message, build_worker_aware_user_message,
+    current_cwd_metadata, new_session_id, resolve_provider_model,
 };
 
 const DOCTOR_PROBE_TIMEOUT_MS: u64 = 1_000;
@@ -76,7 +76,7 @@ pub fn run_with_input<R: CommandRunner, I: BufRead, W: Write>(
         Some(Command::Status(args)) => status_session(&client, args, out),
         Some(Command::Repair(args)) => repair_session(&client, args, out),
         Some(Command::Abort(args)) => abort_session(&client, args, out),
-        Some(Command::Doctor) => doctor(&client, out),
+        Some(Command::Doctor(args)) => doctor(&client, args, out),
         Some(Command::Models(args)) => models(&client, args, out),
         Some(Command::Workers(args)) => workers(&client, args, out),
         Some(Command::Functions(args)) => functions(&client, args, out),
@@ -111,6 +111,15 @@ fn setup<R: CommandRunner, W: Write>(
         if !install.trim().is_empty() {
             writeln!(out, "{install}")?;
         }
+        if args.coding_full {
+            writeln!(out, "installing coding worker profile")?;
+            let install = client
+                .worker_add_coding_full()
+                .context("install coding worker profile")?;
+            if !install.trim().is_empty() {
+                writeln!(out, "{install}")?;
+            }
+        }
     }
 
     let openai = credential("OPENAI_API_KEY", args.ignore_env_credentials);
@@ -138,7 +147,7 @@ fn setup<R: CommandRunner, W: Write>(
     }
 
     if !args.no_health_check {
-        health_probe(client, out)?;
+        health_probe_with_options(client, out, args.coding_full)?;
     }
 
     Ok(())
@@ -154,7 +163,7 @@ fn run_session<R: CommandRunner, W: Write>(
     start_session(
         client,
         &session_id,
-        vec![build_user_message(&args.prompt)],
+        vec![build_prompt_message(&args.prompt, &config, true)],
         &config,
         out,
     )
@@ -169,7 +178,8 @@ fn resume_session<R: CommandRunner, W: Write>(
     let mut messages = load_session_messages(client, &args.session_id)
         .with_context(|| format!("load session {} transcript", args.session_id))?;
     if let Some(prompt) = &args.prompt {
-        messages.push(build_user_message(prompt));
+        let empty_session = messages.is_empty();
+        messages.push(build_prompt_message(prompt, &config, empty_session));
     }
     if messages.is_empty() {
         return Err(anyhow!(
@@ -462,8 +472,22 @@ fn send_chat_prompt<R: CommandRunner, W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let mut messages = load_session_messages(client, session_id).unwrap_or_default();
-    messages.push(build_user_message(prompt));
+    let empty_session = messages.is_empty();
+    messages.push(build_prompt_message(prompt, config, empty_session));
     start_session(client, session_id, messages, config, out)
+}
+
+fn build_prompt_message(prompt: &str, config: &RunConfig, empty_session: bool) -> Value {
+    let has_system_override = config
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.is_empty())
+        .is_some();
+    if empty_session && !has_system_override {
+        build_worker_aware_user_message(prompt)
+    } else {
+        build_user_message(prompt)
+    }
 }
 
 fn handle_chat_command<R: CommandRunner, W: Write>(
@@ -677,7 +701,7 @@ fn handle_chat_command<R: CommandRunner, W: Write>(
             Ok(Some(next.unwrap_or_else(|| session_id.to_string())))
         }
         "doctor" => {
-            doctor(client, out)?;
+            doctor(client, DoctorArgs { coding_full: false }, out)?;
             Ok(Some(session_id.to_string()))
         }
         _ => {
@@ -934,7 +958,11 @@ fn abort_session<R: CommandRunner, W: Write>(
     Ok(())
 }
 
-fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Result<()> {
+fn doctor<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: DoctorArgs,
+    out: &mut W,
+) -> Result<()> {
     writeln!(
         out,
         "iii: {}",
@@ -961,6 +989,11 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
     if let Some(failure) = report_auth_statuses(client, out)? {
         failures.push(failure);
     }
+    if args.coding_full
+        && let Some(failure) = report_coding_full_profile(client, out)?
+    {
+        failures.push(failure);
+    }
 
     if failures.is_empty() {
         Ok(())
@@ -972,7 +1005,16 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
     }
 }
 
+#[cfg(test)]
 fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Result<()> {
+    health_probe_with_options(client, out, false)
+}
+
+fn health_probe_with_options<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+    coding_full: bool,
+) -> Result<()> {
     writeln!(out, "health checks")?;
     if let Some(failure) = report_harness_or_core(client, out, "harness::status")? {
         return Err(anyhow!("{} failed: {}", failure.label, failure.error));
@@ -981,6 +1023,9 @@ fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) 
     trigger_with_retry(client, "models::list", json!({}), 5_000, "models::list")?;
     writeln!(out, "ok models::list")?;
     require_any_provider_auth(client, out)?;
+    if coding_full {
+        require_coding_full_profile(client, out)?;
+    }
     Ok(())
 }
 
@@ -1095,6 +1140,59 @@ fn report_workspace_fs<R: CommandRunner, W: Write>(
         }
     };
     report_probe(client, out, "workspace fs", "shell::fs::ls", payload)
+}
+
+fn report_coding_full_profile<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<Option<ProbeFailure>> {
+    match client.worker_list() {
+        Ok(worker_list) => {
+            let missing = missing_configured_workers(&worker_list, CODING_FULL_WORKER_STACK);
+            if missing.is_empty() {
+                writeln!(out, "coding profile: ok")?;
+                Ok(None)
+            } else {
+                let missing = missing.join(", ");
+                writeln!(out, "coding profile: error: missing {missing}")?;
+                Ok(Some(ProbeFailure {
+                    label: "coding profile".to_string(),
+                    error: format!("missing configured workers: {missing}"),
+                }))
+            }
+        }
+        Err(err) => {
+            let error = err.to_string();
+            writeln!(out, "coding profile: error: {error}")?;
+            Ok(Some(ProbeFailure {
+                label: "coding profile".to_string(),
+                error,
+            }))
+        }
+    }
+}
+
+fn require_coding_full_profile<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<()> {
+    if let Some(failure) = report_coding_full_profile(client, out)? {
+        return Err(anyhow!("{} failed: {}", failure.label, failure.error));
+    }
+    Ok(())
+}
+
+fn missing_configured_workers<'a>(worker_list: &str, required: &'a [&'a str]) -> Vec<&'a str> {
+    let configured = worker_list
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "NAME" && *name != "----")
+        .collect::<Vec<_>>();
+    required
+        .iter()
+        .copied()
+        .filter(|worker| !configured.iter().any(|name| name == worker))
+        .collect()
 }
 
 fn require_workspace_fs<R: CommandRunner, W: Write>(
@@ -1815,6 +1913,42 @@ mod tests {
     }
 
     #[test]
+    fn setup_coding_full_installs_profile_workers() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok("installed harness\n"),
+            MockRunner::ok("installed coding profile\n"),
+        ]);
+        let cli = Cli::try_parse_from([
+            "iii-code",
+            "setup",
+            "--coding-full",
+            "--no-health-check",
+            "--ignore-env-credentials",
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        assert_eq!(
+            calls[2],
+            vec![
+                "worker".to_string(),
+                "add".to_string(),
+                "--no-wait".to_string(),
+                "mcp".to_string(),
+                "iii-lsp".to_string(),
+                "iii-database@1.0.4".to_string(),
+            ]
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("installing coding worker profile"));
+        assert!(text.contains("installed coding profile"));
+    }
+
+    #[test]
     fn setup_falls_back_to_core_when_harness_add_fails() {
         let runner = MockRunner::new(vec![
             MockRunner::ok("0.11.6\n"),
@@ -1943,6 +2077,28 @@ mod tests {
         assert!(text.contains("harness: unavailable"));
         assert!(text.contains("core stack: ok"));
         assert!(text.contains("anthropic auth: ok"));
+    }
+
+    #[test]
+    fn doctor_checks_coding_full_profile_when_requested() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok("mcp binary running\niii-lsp binary running\n"),
+            MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok("mcp binary running\niii-lsp binary running\n"),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "doctor", "--coding-full"]).unwrap();
+        let mut out = Vec::new();
+
+        let err = run(cli, &runner, &mut out).unwrap_err().to_string();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains("coding profile: error: missing iii-database"));
+        assert!(err.contains("coding profile"));
     }
 
     #[test]
@@ -2128,6 +2284,23 @@ mod tests {
         let payload = calls[1].join(" ");
         assert!(payload.contains("old"));
         assert!(payload.contains("new"));
+    }
+
+    #[test]
+    fn run_adds_worker_discovery_context_to_first_turn() {
+        let runner = MockRunner::new(vec![MockRunner::ok(r#"{"messages":[]}"#)]);
+        let cli =
+            Cli::try_parse_from(["iii-code", "run", "use the right worker", "--wait"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let calls = runner.calls.borrow();
+        let payload = calls[0].join(" ");
+        assert!(payload.contains("run::start_and_wait"));
+        assert!(payload.contains("Installed iii workers"));
+        assert!(payload.contains("engine::functions::list"));
+        assert!(payload.contains("use the right worker"));
     }
 
     #[test]
