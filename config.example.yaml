@@ -1,0 +1,172 @@
+workers:
+  - name: iii-state
+    config:
+      adapter:
+        name: kv
+        config:
+          store_method: file_based
+          file_path: ./data/state_store.db
+  - name: iii-queue
+    config:
+      adapter:
+        name: builtin
+  - name: iii-stream
+    config:
+      port: 3112
+      host: 127.0.0.1
+      adapter:
+        name: kv
+        config:
+          store_method: file_based
+          file_path: ./data/stream_store
+  - name: iii-bridge
+  - name: iii-http
+    config:
+      port: 3111
+      host: 127.0.0.1
+      default_timeout: 30000
+      concurrency_request_limit: 1024
+      cors:
+        allowed_origins:
+        - '*'
+        allowed_methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+  - name: turn-orchestrator
+    config:
+      sync_default_timeout_ms: 120000
+      sync_poll_interval_ms: 50
+  - name: provider-router
+  - name: session-tree
+    config:
+      store_backend: iii_state
+  - name: session-inbox
+  - name: models-catalog
+    config:
+      engine_url: ws://127.0.0.1:49134
+      skills_register_timeout_ms: 5000
+      skills_unregister_timeout_ms: 2000
+      state_request_timeout_ms: 5000
+  - name: hook-fanout
+  - name: policy-denylist
+    config:
+      denied_functions:
+      - bash:rm -rf
+      - sudo
+      - curl-pipe-bash
+      topic: agent::before_function_call
+  - name: shell
+    config:
+      allowed_env:
+      - PATH
+      - HOME
+      - LANG
+      - LC_ALL
+      - TERM
+      allowlist:
+      - ls
+      - cat
+      - pwd
+      - echo
+      - grep
+      - wc
+      - head
+      - tail
+      - sort
+      - uniq
+      - cut
+      - date
+      - whoami
+      - hostname
+      - which
+      - jq
+      - uname
+      - df
+      - du
+      - ps
+      - printenv
+      - basename
+      - dirname
+      - rg
+      - git
+      - cargo
+      - rustc
+      - npm
+      - pnpm
+      - bun
+      - node
+      - python
+      - python3
+      - make
+      - mkdir
+      - touch
+      default_timeout_ms: 10000
+      denylist_patterns:
+      - rm\s+-rf\s+/
+      - :\(\)\s*\{\s*:\|
+      - mkfs
+      - dd\s+if=
+      - shutdown
+      - reboot
+      - /etc/passwd
+      - /etc/shadow
+      - \bfind\b[^|;&]*-exec(dir)?\b
+      - \bawk\b[^|;&]*system\s*\(
+      - \bsed\b[^|;&]*(-i\b|\be\b)
+      - \bcurl\b[^|;&]*(file://|-o\s|--output-dir\b|-F\s+@)
+      - \bgit\b[^|;&]*(--upload-pack|--receive-pack|core\.pager|core\.hooksPath|GIT_SSH_COMMAND)
+      - \b(node|python3?)\b[^|;&]*\s-(e|c)\b
+      - \bnpm\b[^|;&]*\brun\b
+      fs:
+        allow_unjailed: false
+        denylist_paths:
+        - /etc/passwd
+        - /etc/shadow
+        host_root: .
+        max_read_bytes: 16777216
+        max_write_bytes: 16777216
+      inherit_env: false
+      job_retention_secs: 3600
+      max_concurrent_jobs: 16
+      max_output_bytes: 1048576
+      max_timeout_ms: 30000
+      sandbox:
+        enabled: true
+      working_dir: .
+  - name: provider-anthropic
+    config:
+      default_api_url: https://api.anthropic.com/v1/messages
+      default_max_tokens: 4096
+  - name: provider-openai
+  - name: auth-credentials
+    config:
+      engine_url: ws://127.0.0.1:49134
+      store: iii_state
+  - name: llm-budget
+    config:
+      skills_handshake_deadline_secs: 180
+      skills_trigger_timeout_ms: 5000
+  - name: skills
+    config:
+      scopes:
+        prompts: prompts
+        skills: skills
+      state_timeout_ms: 10000
+  - name: approval-gate
+    config:
+      approval_state_scope: approvals
+      default_timeout_ms: 300000
+      topic: agent::before_function_call
+  - name: iii-sandbox
+    config:
+      auto_install: true
+      image_allowlist:
+        - python
+        - node
+      default_idle_timeout_secs: 300
+      max_concurrent_sandboxes: 32
+      default_cpus: 1
+      default_memory_mb: 512
