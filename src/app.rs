@@ -911,11 +911,28 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
     out: &mut W,
     harness_label: &str,
 ) -> Result<Option<ProbeFailure>> {
-    let Some(harness_failure) =
-        report_probe(client, out, harness_label, "harness::status", json!({}))?
-    else {
-        return Ok(None);
-    };
+    let harness_failure =
+        match client.trigger("harness::status", json!({}), DOCTOR_PROBE_TIMEOUT_MS) {
+            Ok(value) => {
+                if let Some(failure) =
+                    probe_failure_from_value(harness_label, "harness::status", &value)
+                {
+                    writeln!(out, "{harness_label}: unavailable: {}", failure.error)?;
+                    failure
+                } else {
+                    writeln!(out, "{harness_label}: ok")?;
+                    return Ok(None);
+                }
+            }
+            Err(err) => {
+                let error = err.to_string();
+                writeln!(out, "{harness_label}: unavailable: {error}")?;
+                ProbeFailure {
+                    label: harness_label.to_string(),
+                    error,
+                }
+            }
+        };
 
     match client.trigger(
         "engine::functions::list",
@@ -1608,7 +1625,7 @@ mod tests {
         run(cli, &runner, &mut out).unwrap();
 
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("harness: error"));
+        assert!(text.contains("harness: unavailable"));
         assert!(text.contains("core stack: ok"));
         assert!(text.contains("anthropic auth: ok"));
     }
@@ -1654,7 +1671,7 @@ mod tests {
         health_probe(&client, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
 
-        assert!(text.contains("harness::status: error"));
+        assert!(text.contains("harness::status: unavailable"));
         assert!(text.contains("core stack: ok"));
         assert!(text.contains("ok models::list"));
     }
