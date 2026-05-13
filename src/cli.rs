@@ -196,7 +196,7 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 750)]
     pub poll_interval_ms: u64,
 
-    #[arg(long, default_value_t = 600_000)]
+    #[arg(long, default_value_t = 1_800_000)]
     pub stream_timeout_ms: u64,
 
     #[arg(long)]
@@ -239,7 +239,7 @@ pub struct ResumeArgs {
     #[arg(long, default_value_t = 750)]
     pub poll_interval_ms: u64,
 
-    #[arg(long, default_value_t = 600_000)]
+    #[arg(long, default_value_t = 1_800_000)]
     pub stream_timeout_ms: u64,
 
     #[arg(long)]
@@ -562,6 +562,7 @@ mod tests {
                 assert!(args.approval_required.is_empty());
                 assert_eq!(args.image, "python");
                 assert_eq!(args.idle_timeout_secs, 300);
+                assert_eq!(args.stream_timeout_ms, 1_800_000);
             }
             _ => panic!("expected run command"),
         }
@@ -638,7 +639,10 @@ mod tests {
     fn parses_resume_followup_and_session_tree_commands() {
         let resume = Cli::try_parse_from(["iii-code", "resume", "s1", "continue"]).unwrap();
         match resume.command.unwrap() {
-            Command::Resume(args) => assert_eq!(args.prompt.as_deref(), Some("continue")),
+            Command::Resume(args) => {
+                assert_eq!(args.prompt.as_deref(), Some("continue"));
+                assert_eq!(args.stream_timeout_ms, 1_800_000);
+            }
             _ => panic!("expected resume command"),
         }
 

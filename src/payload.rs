@@ -15,6 +15,10 @@ iii-code client context:
 - Installed iii workers and live iii functions are the capability surface.
 - Before saying a tool is unavailable, inspect live functions with agent_call to engine::functions::list and fetch relevant skill docs with skill::fetch.
 - Prefer installed worker functions for shell, filesystem, sandbox, approval, MCP, LSP, database, session, state, stream, and queue work.
+- Behave like a full coding agent: inspect, edit, test, and keep going until the user's request is handled.
+- If you say you will inspect, read, run, or edit something, call the matching worker function in the same turn.
+- If a file read returns a channel or streaming handle instead of content, follow that handle or use shell::exec to retrieve the content before concluding.
+- After two failed attempts with the same tool shape, change approach and state the pivot briefly.
 - If a needed capability is missing, name the worker or function that should be installed with iii worker add.";
 
 #[derive(Debug, Clone)]
@@ -443,6 +447,8 @@ mod tests {
         assert!(text.contains("Installed iii workers"));
         assert!(text.contains("engine::functions::list"));
         assert!(text.contains("skill::fetch"));
+        assert!(text.contains("full coding agent"));
+        assert!(text.contains("same turn"));
     }
 
     #[test]

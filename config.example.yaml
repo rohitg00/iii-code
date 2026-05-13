@@ -83,11 +83,17 @@ workers:
       - hostname
       - which
       - jq
+      - sed
+      - awk
+      - perl
+      - find
+      - xargs
       - uname
       - df
       - du
       - ps
       - printenv
+      - env
       - basename
       - dirname
       - rg
@@ -95,14 +101,32 @@ workers:
       - cargo
       - rustc
       - npm
+      - npx
       - pnpm
       - bun
       - node
       - python
       - python3
+      - pip
+      - pip3
+      - pytest
+      - uv
+      - go
       - make
+      - sh
+      - bash
       - mkdir
       - touch
+      - cp
+      - mv
+      - rm
+      - chmod
+      - ln
+      - sleep
+      - true
+      - false
+      - curl
+      - wget
       default_timeout_ms: 10000
       denylist_patterns:
       - rm\s+-rf\s+/
@@ -113,13 +137,8 @@ workers:
       - reboot
       - /etc/passwd
       - /etc/shadow
-      - \bfind\b[^|;&]*-exec(dir)?\b
-      - \bawk\b[^|;&]*system\s*\(
-      - \bsed\b[^|;&]*(-i\b|\be\b)
       - \bcurl\b[^|;&]*(file://|-o\s|--output-dir\b|-F\s+@)
       - \bgit\b[^|;&]*(--upload-pack|--receive-pack|core\.pager|core\.hooksPath|GIT_SSH_COMMAND)
-      - \b(node|python3?)\b[^|;&]*\s-(e|c)\b
-      - \bnpm\b[^|;&]*\brun\b
       fs:
         allow_unjailed: false
         denylist_paths:

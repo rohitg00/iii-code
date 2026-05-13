@@ -1,7 +1,8 @@
 # Feature Parity Gaps
 
-This document tracks product behavior `iii-code` should add while staying a
-thin terminal CLI on top of the upstream iii harness stack.
+This document tracks product behavior `iii-code` should add to reach practical
+Pi/Kimchi coding-agent parity while staying on top of the upstream iii harness
+stack.
 
 ## Sources
 
@@ -10,8 +11,10 @@ thin terminal CLI on top of the upstream iii harness stack.
 
 ## Boundary
 
-`iii-code` is a thin Rust CLI around the installed `iii` binary and the public
-worker registry. Setup must install the upstream harness with:
+`iii-code` is a Rust terminal coding agent around the installed `iii` binary
+and the public worker registry. The target is not a minimal wrapper; it should
+feel like a complete coding agent when the iii workers provide the underlying
+capability. Setup must install the upstream harness with:
 
 ```bash
 iii worker add harness
@@ -24,15 +27,17 @@ The harness worker declares the core stack in `harness/iii.worker.yaml`:
 `provider-anthropic`, `provider-openai`, `auth-credentials`, `llm-budget`,
 `skills`, `approval-gate`, and `iii-sandbox`.
 
-`iii-code` should add terminal UX and payload construction around those workers.
-It should not publish a competing harness or checked-in worker lockfile. If the
-harness artifact is temporarily unavailable, the CLI may install the same core
-workers from the public registry as a fallback.
+`iii-code` should add terminal UX, parity-oriented setup defaults, diagnostics,
+and payload construction around those workers. It should not publish a
+competing harness or checked-in worker lockfile. If the harness artifact is
+temporarily unavailable, the CLI may install the same core workers from the
+public registry as a fallback.
 
 For a fuller coding profile, `iii-code setup --coding-full` additionally
 installs public registry workers `mcp`, `iii-lsp`, and `iii-database@1.0.4`.
-The CLI only installs and verifies that profile; the model still discovers
-usable functions from the running engine.
+The CLI installs that profile and verifies both configured workers and live
+runtime functions for MCP and database access; the model still discovers usable
+functions from the running engine.
 
 ## Covered By Existing Workers
 
@@ -55,7 +60,10 @@ usable functions from the running engine.
   and falls back to the core worker stack from the public registry.
 - `setup --coding-full` installs `mcp`, `iii-lsp`, and
   `iii-database@1.0.4`; `doctor --coding-full` verifies those workers are
-  configured.
+  configured and that the MCP/database functions are actually registered.
+- `config.example.yaml` uses coding-agent defaults for the shell worker:
+  normal validation commands, `npm run ...`, and short `node -e`/`python -c`
+  checks are allowed while destructive patterns remain blocked.
 - Provider credentials are read from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
   and stored through `auth::set_token`; argv secret flags are not supported.
 - `run` and `resume` construct the current `turn-orchestrator` payload,
@@ -82,31 +90,38 @@ usable functions from the running engine.
 
 ## Parity Gaps
 
-Features that map cleanly to existing iii workers:
+Highest-priority Kimchi/Pi parity gaps that map cleanly to existing iii
+workers or CLI behavior:
 
 - MCP server configuration import/export. The `mcp` worker is now part of the
   optional coding profile; the missing piece is a setup helper around existing
   worker config surfaces.
 - Model switching and model metadata. `models::list` is already the read path;
   the missing piece is better CLI formatting and defaults.
-- Permission presets. This should compile to `approval_required` values and
-  policy worker configuration.
+- Permission presets. This should compile to `approval_required` values, shell
+  policy worker configuration, and named modes that match common coding-agent
+  expectations.
 - Continue/resume ergonomics. The shell and session-tree commands exist; next
-  work is a richer selector over entries and branches.
+  work is a richer selector over entries and branches, plus automatic recovery
+  when a turn times out before emitting a terminal event.
 - Session audit and benchmark smoke runs. These should use `run::start_and_wait`
   and stored `agent` state.
+- Prompt recovery parity. Kimchi injects continuation nudges and strips stale
+  prompt scaffolding; equivalent behavior should live in the orchestrator or a
+  stable worker contract, with the CLI only surfacing controls.
 
-Features that need more design before adding:
+Features that need a worker or orchestrator contract before adding:
 
-- Multi-model orchestration and subagents. That belongs in a worker or
-  orchestrator contract, not in the thin CLI.
+- Multi-model orchestration and subagents. Kimchi/Pi provide this through
+  extensions; iii-code should expose it once the iii worker contract exists.
 - Tags and cost attribution. Likely should become metadata passed through the
   run payload and consumed by `llm-budget`, but there is no stable public
   contract in the current worker stack.
 - Project-mode execution. This is a separate project-state machine and should
   be a new worker if adopted, with the CLI only issuing commands.
 - Clipboard/image paste, web fetch/search, themes, and custom TUI affordances.
-  These are useful terminal UX features, but v1 stays plain streaming output.
+  These are useful parity features, not out-of-scope forever; they need clear
+  worker/function contracts or terminal UX designs.
 - ACP/editor mode. The upstream `acp` worker exists separately; `iii-code`
   should not bundle it unless the product target changes from terminal CLI to
   editor integration.
