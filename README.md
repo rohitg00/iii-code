@@ -58,12 +58,14 @@ cargo install --path .
 ## Prerequisites
 
 - latest `iii` CLI on `PATH`
+- worker stack installed in the local iii config
 - `iii` engine started from this repo when running sessions
 - provider credentials in environment variables
 
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
+iii worker add harness
 iii
 ```
 
@@ -77,7 +79,12 @@ iii-code setup
 `iii worker add harness`, falls back to installing the core worker dependencies
 from the same registry if harness installation fails, stores `OPENAI_API_KEY`
 and `ANTHROPIC_API_KEY` through `auth::set_token`, then probes
-`harness::status`, `models::list`, and `auth::status`.
+`harness::status` or the required core worker functions, `models::list`, and
+`auth::status`.
+
+`iii worker list` showing `stopped` is normal when the engine is not running.
+Keep `iii` running in one terminal; the same list should then show the engine,
+provider, shell, approval, skills, and sandbox workers as `running`.
 
 The installed stack must include the execution path, not just the run
 orchestrator. In practice that means `setup` should leave these workers in the
@@ -220,8 +227,8 @@ iii-code functions --filter run::
 ```
 
 `doctor` is read-only. It reports the installed iii version, managed worker
-status, harness health, model catalog health, and provider auth status. Probe
-failures are printed and make the command exit nonzero.
+status, harness or core runtime health, model catalog health, and provider auth
+status. Probe failures are printed and make the command exit nonzero.
 
 Useful checks:
 

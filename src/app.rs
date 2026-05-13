@@ -30,6 +30,19 @@ use crate::payload::{
 };
 
 const DOCTOR_PROBE_TIMEOUT_MS: u64 = 1_000;
+const CORE_RUNTIME_FUNCTIONS: &[&str] = &[
+    "run::start",
+    "run::start_and_wait",
+    "models::list",
+    "auth::status",
+    "session-tree::list",
+    "session-tree::messages",
+    "stream::list",
+    "router::abort",
+    "shell::exec",
+    "approval::list_pending",
+    "sandbox::create",
+];
 
 #[cfg(test)]
 pub fn run<R: CommandRunner, W: Write>(cli: Cli, runner: R, out: &mut W) -> Result<()> {
@@ -718,7 +731,7 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
             .trim()
     )?;
     let mut failures = Vec::new();
-    if let Some(failure) = report_probe(client, out, "harness", "harness::status", json!({}))? {
+    if let Some(failure) = report_harness_or_core(client, out, "harness")? {
         failures.push(failure);
     }
     if let Some(failure) = report_probe(client, out, "models", "models::list", json!({}))? {
@@ -755,7 +768,9 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
 
 fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Result<()> {
     writeln!(out, "health checks")?;
-    require_probe(client, out, "harness::status", "harness::status", json!({}))?;
+    if let Some(failure) = report_harness_or_core(client, out, "harness::status")? {
+        return Err(anyhow!("{} failed: {}", failure.label, failure.error));
+    }
     trigger_with_retry(client, "models::list", json!({}), 5_000, "models::list")?;
     writeln!(out, "ok models::list")?;
     for provider in ["openai", "anthropic"] {
@@ -816,20 +831,6 @@ impl ProbeFailure {
     }
 }
 
-fn require_probe<R: CommandRunner, W: Write>(
-    client: &IiiClient<R>,
-    out: &mut W,
-    label: &str,
-    function_id: &str,
-    payload: Value,
-) -> Result<()> {
-    if let Some(failure) = report_probe(client, out, label, function_id, payload)? {
-        Err(anyhow!("{} failed: {}", failure.label, failure.error))
-    } else {
-        Ok(())
-    }
-}
-
 fn report_probe<R: CommandRunner, W: Write>(
     client: &IiiClient<R>,
     out: &mut W,
@@ -855,6 +856,80 @@ fn report_probe<R: CommandRunner, W: Write>(
             }))
         }
     }
+}
+
+fn report_harness_or_core<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+    harness_label: &str,
+) -> Result<Option<ProbeFailure>> {
+    let Some(harness_failure) =
+        report_probe(client, out, harness_label, "harness::status", json!({}))?
+    else {
+        return Ok(None);
+    };
+
+    match client.trigger(
+        "engine::functions::list",
+        build_functions_payload(false),
+        DOCTOR_PROBE_TIMEOUT_MS,
+    ) {
+        Ok(value) => {
+            let missing = missing_core_runtime_functions(&value);
+            if missing.is_empty() {
+                writeln!(out, "core stack: ok")?;
+                Ok(None)
+            } else {
+                let missing = missing.join(", ");
+                writeln!(out, "core stack: error: missing {missing}")?;
+                Ok(Some(ProbeFailure {
+                    label: "core stack".to_string(),
+                    error: format!(
+                        "harness unavailable ({}); missing core functions: {missing}",
+                        harness_failure.error
+                    ),
+                }))
+            }
+        }
+        Err(err) => {
+            let error = err.to_string();
+            writeln!(out, "core stack: error: {error}")?;
+            Ok(Some(ProbeFailure {
+                label: "core stack".to_string(),
+                error: format!(
+                    "harness unavailable ({}); core probe failed: {error}",
+                    harness_failure.error
+                ),
+            }))
+        }
+    }
+}
+
+fn missing_core_runtime_functions(value: &Value) -> Vec<&'static str> {
+    let ids = function_ids_from_value(value);
+    CORE_RUNTIME_FUNCTIONS
+        .iter()
+        .copied()
+        .filter(|required| !ids.iter().any(|id| id == required))
+        .collect()
+}
+
+fn function_ids_from_value(value: &Value) -> Vec<String> {
+    let source = value
+        .get("functions")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    source
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            item.get("function_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn probe_failure_from_value(label: &str, function_id: &str, value: &Value) -> Option<ProbeFailure> {
@@ -1466,20 +1541,75 @@ mod tests {
     }
 
     #[test]
-    fn health_probe_fails_when_harness_probe_fails() {
-        let runner = MockRunner::new(vec![CommandOutput {
-            status: 1,
-            stdout: String::new(),
-            stderr: "missing harness".into(),
-        }]);
+    fn doctor_accepts_core_stack_when_harness_probe_fails() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok("core workers running\n"),
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "missing harness".into(),
+            },
+            MockRunner::ok(core_function_list_json()),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":false}"#),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "doctor"]).unwrap();
+        let mut out = Vec::new();
+
+        let err = run(cli, &runner, &mut out).unwrap_err().to_string();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("harness: error"));
+        assert!(text.contains("core stack: ok"));
+        assert!(err.contains("anthropic auth"));
+        assert!(!err.contains("core stack"));
+    }
+
+    #[test]
+    fn health_probe_accepts_core_stack_when_harness_probe_fails() {
+        let runner = MockRunner::new(vec![
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "missing harness".into(),
+            },
+            MockRunner::ok(core_function_list_json()),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+        ]);
+        let client = IiiClient::new(&runner, "127.0.0.1", 49134);
+        let mut out = Vec::new();
+
+        health_probe(&client, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains("harness::status: error"));
+        assert!(text.contains("core stack: ok"));
+        assert!(text.contains("ok models::list"));
+    }
+
+    #[test]
+    fn health_probe_fails_when_harness_and_core_stack_fail() {
+        let runner = MockRunner::new(vec![
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "missing harness".into(),
+            },
+            MockRunner::ok(r#"{"functions":[{"function_id":"models::list"}]}"#),
+        ]);
         let client = IiiClient::new(&runner, "127.0.0.1", 49134);
         let mut out = Vec::new();
 
         let err = health_probe(&client, &mut out).unwrap_err().to_string();
         let text = String::from_utf8(out).unwrap();
 
-        assert!(text.contains("harness::status: error"));
-        assert!(err.contains("harness::status failed"));
+        assert!(text.contains("core stack: error"));
+        assert!(err.contains("core stack failed"));
+        assert!(err.contains("missing core functions"));
     }
 
     #[test]
@@ -1689,5 +1819,13 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    fn core_function_list_json() -> String {
+        let functions = CORE_RUNTIME_FUNCTIONS
+            .iter()
+            .map(|id| json!({ "function_id": id }))
+            .collect::<Vec<_>>();
+        json!({ "functions": functions }).to_string()
     }
 }
