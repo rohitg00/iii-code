@@ -1274,7 +1274,6 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
                 if let Some(failure) =
                     probe_failure_from_value(harness_label, "harness::status", &value)
                 {
-                    writeln!(out, "{harness_label}: unavailable: {}", failure.error)?;
                     failure
                 } else {
                     writeln!(out, "{harness_label}: ok")?;
@@ -1283,7 +1282,6 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
             }
             Err(err) => {
                 let error = err.to_string();
-                writeln!(out, "{harness_label}: unavailable: {error}")?;
                 ProbeFailure {
                     label: harness_label.to_string(),
                     error,
@@ -1299,9 +1297,15 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
         Ok(value) => {
             let missing = missing_core_runtime_functions(&value);
             if missing.is_empty() {
+                writeln!(out, "{harness_label}: unavailable; using core stack")?;
                 writeln!(out, "core stack: ok")?;
                 Ok(None)
             } else {
+                writeln!(
+                    out,
+                    "{harness_label}: unavailable: {}",
+                    harness_failure.error
+                )?;
                 let missing = missing.join(", ");
                 writeln!(out, "core stack: error: missing {missing}")?;
                 Ok(Some(ProbeFailure {
@@ -1315,6 +1319,11 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
         }
         Err(err) => {
             let error = err.to_string();
+            writeln!(
+                out,
+                "{harness_label}: unavailable: {}",
+                harness_failure.error
+            )?;
             writeln!(out, "core stack: error: {error}")?;
             Ok(Some(ProbeFailure {
                 label: "core stack".to_string(),
