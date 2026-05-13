@@ -623,7 +623,13 @@ fn sessions<R: CommandRunner, W: Write>(
 }
 
 fn session_tree_is_empty(value: &Value) -> bool {
-    value.get("total").and_then(Value::as_u64) == Some(0)
+    let total_empty = value.get("total").and_then(Value::as_u64) == Some(0);
+    let sessions_empty = value
+        .get("sessions")
+        .and_then(Value::as_array)
+        .is_some_and(|sessions| sessions.is_empty());
+    let missing_both = value.get("total").is_none() && value.get("sessions").is_none();
+    total_empty || sessions_empty || missing_both
 }
 
 fn messages<R: CommandRunner, W: Write>(
@@ -1559,7 +1565,7 @@ mod tests {
     #[test]
     fn sessions_falls_back_when_session_tree_is_empty() {
         let runner = MockRunner::new(vec![
-            MockRunner::ok(r#"{"sessions":[],"total":0}"#),
+            MockRunner::ok(r#"{"sessions":[]}"#),
             MockRunner::ok(
                 r#"[{"session_id":"legacy","state":"stopped","turn_count":1,"updated_at_ms":2}]"#,
             ),
@@ -1571,6 +1577,17 @@ mod tests {
 
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("legacy"));
+    }
+
+    #[test]
+    fn session_tree_empty_handles_missing_fields() {
+        assert!(session_tree_is_empty(&json!({"total":0})));
+        assert!(session_tree_is_empty(&json!({"sessions":[]})));
+        assert!(session_tree_is_empty(&json!({})));
+        assert!(!session_tree_is_empty(&json!({"total":1})));
+        assert!(!session_tree_is_empty(
+            &json!({"sessions":[{"session_id":"s1"}]})
+        ));
     }
 
     #[test]
