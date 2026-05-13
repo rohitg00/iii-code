@@ -34,8 +34,18 @@ pub enum Command {
     Sessions(SessionsArgs),
     #[command(about = "Print the active transcript for a session")]
     Messages(MessagesArgs),
+    #[command(about = "Print the full session DAG")]
+    Tree(TreeArgs),
     #[command(about = "Fork a session from a session-tree entry id")]
     Fork(ForkArgs),
+    #[command(about = "Clone a complete session tree")]
+    Clone(CloneArgs),
+    #[command(about = "Export a session branch as self-contained HTML")]
+    Export(ExportArgs),
+    #[command(about = "Append a compaction checkpoint to a session")]
+    Compact(CompactArgs),
+    #[command(about = "Print durable turn state for a session")]
+    Status(StatusArgs),
     #[command(about = "Repair session-tree rows from legacy persisted messages")]
     Repair(RepairArgs),
     #[command(about = "Abort a durable session through provider-router")]
@@ -80,6 +90,9 @@ pub struct ChatArgs {
     #[arg(long)]
     pub session_id: Option<String>,
 
+    #[arg(long, help = "Start a fresh session instead of resuming this cwd")]
+    pub new: bool,
+
     #[arg(long, env = "III_CODE_PROVIDER")]
     pub provider: Option<String>,
 
@@ -120,6 +133,7 @@ impl Default for ChatArgs {
         Self {
             prompt: None,
             session_id: None,
+            new: false,
             provider: None,
             model: None,
             system_prompt: None,
@@ -233,12 +247,63 @@ pub struct MessagesArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct TreeArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Args)]
 pub struct ForkArgs {
     #[arg(help = "Existing iii agent session id")]
     pub session_id: String,
 
     #[arg(help = "session-tree entry id to fork from")]
     pub entry_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CloneArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+
+    #[arg(long)]
+    pub branch_leaf: Option<String>,
+
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct CompactArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
+
+    #[arg(help = "Summary text to record in the session tree")]
+    pub summary: String,
+
+    #[arg(long, default_value_t = 0)]
+    pub tokens_before: u64,
+
+    #[arg(long = "read-file")]
+    pub read_files: Vec<String>,
+
+    #[arg(long = "modified-file")]
+    pub modified_files: Vec<String>,
+
+    #[arg(long)]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    #[arg(help = "Existing iii agent session id")]
+    pub session_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -555,6 +620,47 @@ mod tests {
         match fork.command.unwrap() {
             Command::Fork(args) => assert_eq!(args.entry_id, "e1"),
             _ => panic!("expected fork command"),
+        }
+
+        let tree = Cli::try_parse_from(["iii-code", "tree", "s1"]).unwrap();
+        match tree.command.unwrap() {
+            Command::Tree(args) => assert_eq!(args.session_id, "s1"),
+            _ => panic!("expected tree command"),
+        }
+
+        let clone = Cli::try_parse_from(["iii-code", "clone", "s1"]).unwrap();
+        match clone.command.unwrap() {
+            Command::Clone(args) => assert_eq!(args.session_id, "s1"),
+            _ => panic!("expected clone command"),
+        }
+
+        let export =
+            Cli::try_parse_from(["iii-code", "export", "s1", "--output", "session.html"]).unwrap();
+        match export.command.unwrap() {
+            Command::Export(args) => {
+                assert_eq!(args.output.unwrap(), PathBuf::from("session.html"))
+            }
+            _ => panic!("expected export command"),
+        }
+
+        let compact = Cli::try_parse_from([
+            "iii-code",
+            "compact",
+            "s1",
+            "checkpoint",
+            "--read-file",
+            "src/main.rs",
+        ])
+        .unwrap();
+        match compact.command.unwrap() {
+            Command::Compact(args) => assert_eq!(args.read_files, vec!["src/main.rs"]),
+            _ => panic!("expected compact command"),
+        }
+
+        let status = Cli::try_parse_from(["iii-code", "status", "s1"]).unwrap();
+        match status.command.unwrap() {
+            Command::Status(args) => assert_eq!(args.session_id, "s1"),
+            _ => panic!("expected status command"),
         }
     }
 

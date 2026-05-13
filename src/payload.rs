@@ -10,7 +10,6 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 
 const DEFAULT_PROVIDER: &str = "anthropic";
-const DEFAULT_SYSTEM_PROMPT: &str = "You are iii-code, a power-user coding agent running on iii workers. Use the available iii functions for coding tasks, keep outputs concise, and preserve durable session context.";
 
 #[derive(Debug, Clone)]
 pub struct RunPayloadParams {
@@ -25,6 +24,16 @@ pub struct RunPayloadParams {
     pub max_turns: u32,
     pub cwd: String,
     pub cwd_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionCompactPayloadParams {
+    pub session_id: String,
+    pub summary: String,
+    pub tokens_before: u64,
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
+    pub parent_id: Option<String>,
 }
 
 pub fn new_session_id() -> String {
@@ -94,11 +103,10 @@ pub fn cwd_metadata(path: &Path) -> Result<(String, String)> {
 }
 
 pub fn build_run_payload(params: &RunPayloadParams) -> Value {
-    json!({
+    let mut payload = json!({
         "session_id": params.session_id,
         "provider": params.provider,
         "model": params.model,
-        "system_prompt": params.system_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM_PROMPT),
         "messages": params.messages,
         "max_turns": params.max_turns,
         "approval_required": params.approval_required,
@@ -106,7 +114,11 @@ pub fn build_run_payload(params: &RunPayloadParams) -> Value {
         "cwd": params.cwd,
         "cwd_hash": params.cwd_hash,
         "idle_timeout_secs": params.idle_timeout_secs,
-    })
+    });
+    if let Some(system_prompt) = params.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+        payload["system_prompt"] = json!(system_prompt);
+    }
+    payload
 }
 
 pub fn build_user_message(prompt: &str) -> Value {
@@ -172,6 +184,44 @@ pub fn build_session_fork_payload(session_id: &str, entry_id: &str) -> Value {
         "source_session_id": session_id,
         "from_entry_id": entry_id,
     })
+}
+
+pub fn build_session_clone_payload(session_id: &str) -> Value {
+    json!({
+        "source_session_id": session_id,
+    })
+}
+
+pub fn build_session_tree_payload(session_id: &str) -> Value {
+    json!({
+        "session_id": session_id,
+    })
+}
+
+pub fn build_session_export_payload(session_id: &str, branch_leaf: Option<&str>) -> Value {
+    let mut payload = json!({
+        "session_id": session_id,
+    });
+    if let Some(branch_leaf) = branch_leaf {
+        payload["branch_leaf"] = json!(branch_leaf);
+    }
+    payload
+}
+
+pub fn build_session_compact_payload(params: SessionCompactPayloadParams) -> Value {
+    let mut payload = json!({
+        "session_id": params.session_id,
+        "summary": params.summary,
+        "tokens_before": params.tokens_before,
+        "details": {
+            "read_files": params.read_files,
+            "modified_files": params.modified_files,
+        },
+    });
+    if let Some(parent_id) = params.parent_id {
+        payload["parent_id"] = json!(parent_id);
+    }
+    payload
 }
 
 pub fn build_session_reconcile_payload(session_id: &str, state_snapshot: Value) -> Value {
@@ -368,9 +418,29 @@ mod tests {
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["messages"][0]["content"][0]["text"], "hello");
         assert_eq!(payload["cwd_hash"], "abc");
+        assert!(payload.get("system_prompt").is_none());
         assert_eq!(payload["approval_required"][0], "shell::fs::write");
         assert_eq!(payload["image"], "node");
         assert_eq!(payload["idle_timeout_secs"], 120);
+    }
+
+    #[test]
+    fn build_run_payload_preserves_system_prompt_override() {
+        let payload = build_run_payload(&RunPayloadParams {
+            session_id: "s1".into(),
+            messages: vec![],
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-6".into(),
+            system_prompt: Some("custom".into()),
+            approval_required: vec![],
+            image: "python".into(),
+            idle_timeout_secs: 120,
+            max_turns: 3,
+            cwd: "/tmp/project".into(),
+            cwd_hash: "abc".into(),
+        });
+
+        assert_eq!(payload["system_prompt"], "custom");
     }
 
     #[test]
@@ -384,6 +454,23 @@ mod tests {
             build_session_fork_payload("s1", "e1")["from_entry_id"],
             "e1"
         );
+        assert_eq!(build_session_clone_payload("s1")["source_session_id"], "s1");
+        assert_eq!(build_session_tree_payload("s1")["session_id"], "s1");
+        assert_eq!(
+            build_session_export_payload("s1", Some("leaf"))["branch_leaf"],
+            "leaf"
+        );
+        let compact = build_session_compact_payload(SessionCompactPayloadParams {
+            session_id: "s1".into(),
+            summary: "checkpoint".into(),
+            tokens_before: 10,
+            read_files: vec!["a".into()],
+            modified_files: vec!["b".into()],
+            parent_id: Some("p1".into()),
+        });
+        assert_eq!(compact["summary"], "checkpoint");
+        assert_eq!(compact["details"]["read_files"][0], "a");
+        assert_eq!(compact["parent_id"], "p1");
         assert_eq!(
             build_session_reconcile_payload("s1", json!([]))["state_snapshot"],
             json!([])

@@ -17,6 +17,11 @@ same worker-backed controls as the browser harness:
 ```text
 /sessions
 /messages [session-id]
+/status [session-id]
+/tree [session-id]
+/clone [session-id]
+/export [output.html]
+/compact <summary>
 /functions [filter]
 /workers
 /approvals
@@ -33,9 +38,12 @@ The boundary is the public `iii` CLI and worker functions:
   if the harness artifact cannot be installed
 - run control through `run::start` and `run::start_and_wait`
 - event streaming through `stream::list` over `agent::events`
+- agent tool dispatch through the canonical `agent_call` tool owned by
+  `turn-orchestrator`
 - credentials through `auth::set_token` and `auth::status`
 - model discovery through `models::list`
-- session discovery, transcript loading, fork, and repair through
+- session discovery, transcript loading, tree, clone, export, compact, fork,
+  and repair through
   `session-tree::*`, with legacy state fallback where needed
 - abort through `router::abort`
 - worker and function discovery through `engine::*::list`
@@ -65,6 +73,7 @@ cargo install --path .
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
+cp config.example.yaml config.yaml
 iii worker add harness
 iii
 ```
@@ -107,6 +116,17 @@ use, and reaps idle sandboxes after 300 seconds. Host support is required:
 Apple Silicon macOS or Linux with readable `/dev/kvm`; Windows and Intel Macs
 cannot boot the sandbox microVMs.
 
+`config.example.yaml` includes the complete core harness worker stack, sandbox
+worker, and shell settings. Copy it to `config.yaml` for local use. It pins
+`shell.fs.host_root` and `shell.working_dir` to this repo with `.`. Start `iii`
+from the repo root so `shell::fs::*` can read and write project files. If
+`shell::fs::ls` returns `S215 path escapes host_root`, stop the running `iii`
+process, confirm the engine was started from the repo root, and start it again
+so it picks up the current config. The shell allowlist includes common
+repo-inspection and validation commands such as `rg`, `git`, `cargo`, `npm`,
+`pnpm`, `bun`, `node`, `python`, and `make`; approval policy still lives in the
+worker stack.
+
 Secrets are intentionally not accepted through CLI flags because argv can leak
 through process listings and error logs.
 
@@ -122,12 +142,14 @@ Open the interactive shell:
 
 ```bash
 iii-code
+iii-code --help
 ```
 
 Or start with a prompt:
 
 ```bash
 iii-code chat "inspect this repo and suggest the first cleanup"
+iii-code chat --new "use the harness tools to list this repo and summarize it"
 ```
 
 For scripts, call one turn directly:
@@ -158,11 +180,23 @@ Use existing worker controls when you need more of the harness behavior:
 iii-code run "edit src/main.rs" --approval-required shell::fs::write
 iii-code run "run the node test suite" --image node
 iii-code sessions
+iii-code status <session-id>
 iii-code messages <session-id>
+iii-code tree <session-id>
+iii-code clone <session-id>
+iii-code export <session-id> --output session.html
+iii-code compact <session-id> "compacted after initial investigation"
 iii-code fork <session-id> <entry-id>
 iii-code repair <session-id>
 iii-code abort <session-id>
 ```
+
+When no `--system-prompt` override is passed, `iii-code` deliberately lets
+`turn-orchestrator` build the canonical harness prompt. That prompt gives the
+model the single `agent_call` tool, current working directory, skills index,
+live function discovery rules, and recovery policy. Passing `--system-prompt`
+replaces that harness prompt, so use it only when you intentionally want to
+take over the agent contract.
 
 `--image` selects the sandbox image used by `shell::*` tools. The default is
 `python`; use `--image node` for JavaScript/TypeScript repo work. If you add
@@ -228,8 +262,9 @@ iii-code functions --filter run::
 ```
 
 `doctor` is read-only. It reports the installed iii version, managed worker
-status, harness or core runtime health, model catalog health, and provider auth
-status. Probe failures are printed and make the command exit nonzero.
+status, harness or core runtime health, workspace filesystem access, model
+catalog health, and provider auth status. Probe failures are printed and make
+the command exit nonzero.
 
 Useful checks:
 

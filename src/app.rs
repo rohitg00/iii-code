@@ -9,24 +9,26 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     AbortArgs, ApprovalDenyArgs, ApprovalResolveArgs, ApprovalsArgs, ApprovalsCommand,
-    ApprovalsListArgs, CallArgs, ChatArgs, Cli, Command, ForkArgs, FunctionsArgs, MessagesArgs,
-    ModelsArgs, RepairArgs, ResumeArgs, RunArgs, SandboxArgs, SandboxCommand, SandboxCreateArgs,
-    SandboxExecArgs, SandboxStopArgs, SessionsArgs, SetupArgs, StateArgs, StateCommand,
-    StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs, StreamArgs, StreamCommand,
-    WorkersArgs,
+    ApprovalsListArgs, CallArgs, ChatArgs, Cli, CloneArgs, Command, CompactArgs, ExportArgs,
+    ForkArgs, FunctionsArgs, MessagesArgs, ModelsArgs, RepairArgs, ResumeArgs, RunArgs,
+    SandboxArgs, SandboxCommand, SandboxCreateArgs, SandboxExecArgs, SandboxStopArgs, SessionsArgs,
+    SetupArgs, StateArgs, StateCommand, StateDeleteArgs, StateGetArgs, StateListArgs, StateSetArgs,
+    StatusArgs, StreamArgs, StreamCommand, TreeArgs, WorkersArgs,
 };
 use crate::events::{is_agent_end, normalize_stream_item, render_event, render_final_messages};
 use crate::iii::{CommandRunner, IiiClient};
 use crate::payload::{
-    RunPayloadParams, SandboxCreatePayloadParams, build_abort_payload, build_approval_list_payload,
-    build_approval_resolve_payload, build_auth_payload, build_auth_status_payload,
-    build_connected_workers_payload, build_functions_payload, build_legacy_sessions_payload,
-    build_models_payload, build_run_payload, build_sandbox_create_payload,
-    build_sandbox_exec_payload, build_sandbox_stop_payload, build_session_fork_payload,
-    build_session_messages_payload, build_session_reconcile_payload, build_sessions_payload,
-    build_state_get_payload, build_state_list_payload, build_state_set_payload,
-    build_stream_list_payload, build_stream_list_payload_for, build_user_message,
-    current_cwd_metadata, new_session_id, resolve_provider_model,
+    RunPayloadParams, SandboxCreatePayloadParams, SessionCompactPayloadParams, build_abort_payload,
+    build_approval_list_payload, build_approval_resolve_payload, build_auth_payload,
+    build_auth_status_payload, build_connected_workers_payload, build_functions_payload,
+    build_legacy_sessions_payload, build_models_payload, build_run_payload,
+    build_sandbox_create_payload, build_sandbox_exec_payload, build_sandbox_stop_payload,
+    build_session_clone_payload, build_session_compact_payload, build_session_export_payload,
+    build_session_fork_payload, build_session_messages_payload, build_session_reconcile_payload,
+    build_session_tree_payload, build_sessions_payload, build_state_get_payload,
+    build_state_list_payload, build_state_set_payload, build_stream_list_payload,
+    build_stream_list_payload_for, build_user_message, current_cwd_metadata, new_session_id,
+    resolve_provider_model,
 };
 
 const DOCTOR_PROBE_TIMEOUT_MS: u64 = 1_000;
@@ -40,6 +42,7 @@ const CORE_RUNTIME_FUNCTIONS: &[&str] = &[
     "stream::list",
     "router::abort",
     "shell::exec",
+    "shell::fs::ls",
     "approval::list_pending",
     "sandbox::create",
 ];
@@ -65,7 +68,12 @@ pub fn run_with_input<R: CommandRunner, I: BufRead, W: Write>(
         Some(Command::Resume(args)) => resume_session(&client, args, out),
         Some(Command::Sessions(args)) => sessions(&client, args, out),
         Some(Command::Messages(args)) => messages(&client, args, out),
+        Some(Command::Tree(args)) => tree_session(&client, args, out),
         Some(Command::Fork(args)) => fork_session(&client, args, out),
+        Some(Command::Clone(args)) => clone_session(&client, args, out),
+        Some(Command::Export(args)) => export_session(&client, args, out),
+        Some(Command::Compact(args)) => compact_session(&client, args, out),
+        Some(Command::Status(args)) => status_session(&client, args, out),
         Some(Command::Repair(args)) => repair_session(&client, args, out),
         Some(Command::Abort(args)) => abort_session(&client, args, out),
         Some(Command::Doctor) => doctor(&client, out),
@@ -380,10 +388,10 @@ fn chat<R: CommandRunner, I: BufRead, W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let config = RunConfig::from_chat_args(&args)?;
-    let mut session_id = args.session_id.unwrap_or_else(new_session_id);
+    let (mut session_id, session_source) = initial_chat_session(client, &args);
 
     writeln!(out, "iii-code")?;
-    writeln!(out, "session: {session_id}")?;
+    writeln!(out, "session: {session_id} ({session_source})")?;
     writeln!(out, "model: {}/{}", config.provider, config.model)?;
     writeln!(out, "sandbox: {}", config.image)?;
     writeln!(out, "type /help for commands, /quit to exit")?;
@@ -416,6 +424,34 @@ fn chat<R: CommandRunner, I: BufRead, W: Write>(
 
     writeln!(out, "session: {session_id}")?;
     Ok(())
+}
+
+fn initial_chat_session<R: CommandRunner>(
+    client: &IiiClient<R>,
+    args: &ChatArgs,
+) -> (String, &'static str) {
+    if let Some(session_id) = &args.session_id {
+        return (session_id.clone(), "provided");
+    }
+    if !args.new
+        && let Some(session_id) = load_last_cwd_session(client)
+    {
+        return (session_id, "cwd resume");
+    }
+    (new_session_id(), "new")
+}
+
+fn load_last_cwd_session<R: CommandRunner>(client: &IiiClient<R>) -> Option<String> {
+    let (_, cwd_hash) = current_cwd_metadata().ok()?;
+    let key = format!("harness/cwd/{cwd_hash}/last_session_id");
+    let value = client
+        .trigger("state::get", build_state_get_payload("agent", &key), 5_000)
+        .ok()?;
+    value
+        .as_str()
+        .or_else(|| value.get("value").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn send_chat_prompt<R: CommandRunner, W: Write>(
@@ -471,6 +507,61 @@ fn handle_chat_command<R: CommandRunner, W: Write>(
         "messages" => {
             let target = if rest.is_empty() { session_id } else { rest };
             print_transcript(client, target, out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "status" => {
+            let target = if rest.is_empty() { session_id } else { rest };
+            status_session(
+                client,
+                StatusArgs {
+                    session_id: target.to_string(),
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "tree" => {
+            let target = if rest.is_empty() { session_id } else { rest };
+            tree_session(
+                client,
+                TreeArgs {
+                    session_id: target.to_string(),
+                },
+                out,
+            )?;
+            Ok(Some(session_id.to_string()))
+        }
+        "clone" => {
+            let target = if rest.is_empty() { session_id } else { rest };
+            let next = clone_session_inner(client, target, out)?;
+            Ok(Some(next))
+        }
+        "export" => {
+            let output = if rest.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(rest))
+            };
+            export_session_inner(client, session_id, None, output.as_ref(), out)?;
+            Ok(Some(session_id.to_string()))
+        }
+        "compact" => {
+            if rest.is_empty() {
+                writeln!(out, "usage: /compact <summary>")?;
+            } else {
+                compact_session(
+                    client,
+                    CompactArgs {
+                        session_id: session_id.to_string(),
+                        summary: rest.to_string(),
+                        tokens_before: 0,
+                        read_files: Vec::new(),
+                        modified_files: Vec::new(),
+                        parent_id: None,
+                    },
+                    out,
+                )?;
+            }
             Ok(Some(session_id.to_string()))
         }
         "models" => {
@@ -601,6 +692,11 @@ fn print_chat_help<W: Write>(out: &mut W) -> Result<()> {
     writeln!(out, "/resume <session-id>")?;
     writeln!(out, "/sessions")?;
     writeln!(out, "/messages [session-id]")?;
+    writeln!(out, "/status [session-id]")?;
+    writeln!(out, "/tree [session-id]")?;
+    writeln!(out, "/clone [session-id]")?;
+    writeln!(out, "/export [output.html]")?;
+    writeln!(out, "/compact <summary>")?;
     writeln!(out, "/functions [filter]")?;
     writeln!(out, "/workers")?;
     writeln!(out, "/models")?;
@@ -664,6 +760,36 @@ fn messages<R: CommandRunner, W: Write>(
     print_transcript(client, &args.session_id, out)
 }
 
+fn status_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: StatusArgs,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "state::get",
+            build_state_get_payload("agent", &format!("session/{}/turn_state", args.session_id)),
+            5_000,
+        )
+        .context("load durable turn state")?;
+    print_session_status(&value, out)
+}
+
+fn tree_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: TreeArgs,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "session-tree::tree",
+            build_session_tree_payload(&args.session_id),
+            5_000,
+        )
+        .context("load session tree")?;
+    print_json(&value, out)
+}
+
 fn fork_session<R: CommandRunner, W: Write>(
     client: &IiiClient<R>,
     args: ForkArgs,
@@ -676,6 +802,97 @@ fn fork_session<R: CommandRunner, W: Write>(
             5_000,
         )
         .context("fork session")?;
+    print_json(&value, out)
+}
+
+fn clone_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: CloneArgs,
+    out: &mut W,
+) -> Result<()> {
+    clone_session_inner(client, &args.session_id, out).map(|_| ())
+}
+
+fn clone_session_inner<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    session_id: &str,
+    out: &mut W,
+) -> Result<String> {
+    let value = client
+        .trigger(
+            "session-tree::clone",
+            build_session_clone_payload(session_id),
+            5_000,
+        )
+        .context("clone session tree")?;
+    print_json(&value, out)?;
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("session-tree::clone response missing session_id"))
+}
+
+fn export_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: ExportArgs,
+    out: &mut W,
+) -> Result<()> {
+    export_session_inner(
+        client,
+        &args.session_id,
+        args.branch_leaf.as_deref(),
+        args.output.as_ref(),
+        out,
+    )
+}
+
+fn export_session_inner<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    session_id: &str,
+    branch_leaf: Option<&str>,
+    output: Option<&std::path::PathBuf>,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "session-tree::export_html",
+            build_session_export_payload(session_id, branch_leaf),
+            5_000,
+        )
+        .context("export session html")?;
+    let html = value
+        .get("html")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("session-tree::export_html response missing html"))?;
+    if let Some(path) = output {
+        fs::write(path, html).with_context(|| format!("write {}", path.display()))?;
+        writeln!(out, "exported: {}", path.display())?;
+    } else {
+        writeln!(out, "{html}")?;
+    }
+    Ok(())
+}
+
+fn compact_session<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    args: CompactArgs,
+    out: &mut W,
+) -> Result<()> {
+    let value = client
+        .trigger(
+            "session-tree::compact",
+            build_session_compact_payload(SessionCompactPayloadParams {
+                session_id: args.session_id,
+                summary: args.summary,
+                tokens_before: args.tokens_before,
+                read_files: args.read_files,
+                modified_files: args.modified_files,
+                parent_id: args.parent_id,
+            }),
+            5_000,
+        )
+        .context("append compaction checkpoint")?;
     print_json(&value, out)
 }
 
@@ -735,6 +952,9 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
     if let Some(failure) = report_harness_or_core(client, out, "harness")? {
         failures.push(failure);
     }
+    if let Some(failure) = report_workspace_fs(client, out)? {
+        failures.push(failure);
+    }
     if let Some(failure) = report_probe(client, out, "models", "models::list", json!({}))? {
         failures.push(failure);
     }
@@ -757,6 +977,7 @@ fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) 
     if let Some(failure) = report_harness_or_core(client, out, "harness::status")? {
         return Err(anyhow!("{} failed: {}", failure.label, failure.error));
     }
+    require_workspace_fs(client, out)?;
     trigger_with_retry(client, "models::list", json!({}), 5_000, "models::list")?;
     writeln!(out, "ok models::list")?;
     require_any_provider_auth(client, out)?;
@@ -856,6 +1077,44 @@ fn report_auth_statuses<R: CommandRunner, W: Write>(
     } else {
         Ok(Some(provider_auth_failure(failures)))
     }
+}
+
+fn report_workspace_fs<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<Option<ProbeFailure>> {
+    let payload = match workspace_fs_payload() {
+        Ok(payload) => payload,
+        Err(err) => {
+            let error = err.to_string();
+            writeln!(out, "workspace fs: error: {error}")?;
+            return Ok(Some(ProbeFailure {
+                label: "workspace fs".to_string(),
+                error,
+            }));
+        }
+    };
+    report_probe(client, out, "workspace fs", "shell::fs::ls", payload)
+}
+
+fn require_workspace_fs<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<()> {
+    trigger_with_retry(
+        client,
+        "shell::fs::ls",
+        workspace_fs_payload()?,
+        5_000,
+        "shell::fs::ls current cwd",
+    )?;
+    writeln!(out, "ok shell::fs::ls cwd")?;
+    Ok(())
+}
+
+fn workspace_fs_payload() -> Result<Value> {
+    let (cwd, _) = current_cwd_metadata()?;
+    Ok(json!({ "path": cwd }))
 }
 
 fn require_any_provider_auth<R: CommandRunner, W: Write>(
@@ -1061,6 +1320,59 @@ fn print_sessions<W: Write>(value: &Value, limit: usize, out: &mut W) -> Result<
             "{session_id}\t{state}\tentries={turn_count}\tupdated={updated_at_ms}\t{summary}"
         )?;
     }
+    Ok(())
+}
+
+fn print_session_status<W: Write>(value: &Value, out: &mut W) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return print_json(value, out);
+    };
+    let session_id = object
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let state = object
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let turn_count = object
+        .get("turn_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let max_turns = object
+        .get("max_turns")
+        .and_then(Value::as_u64)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unbounded".to_string());
+    let pending = object
+        .get("pending_function_calls")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let updated = object
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    writeln!(out, "session: {session_id}")?;
+    writeln!(out, "state: {state}")?;
+    writeln!(out, "turns: {turn_count}/{max_turns}")?;
+    writeln!(out, "pending function calls: {pending}")?;
+    if let Some(assistant) = object.get("last_assistant") {
+        let provider = assistant
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let model = assistant
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let stop_reason = assistant
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        writeln!(out, "last assistant: {provider}/{model} ({stop_reason})")?;
+    }
+    writeln!(out, "updated: {updated}")?;
     Ok(())
 }
 
@@ -1581,6 +1893,7 @@ mod tests {
             MockRunner::ok("0.11.6\n"),
             MockRunner::ok("harness ready\n"),
             MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
             CommandOutput {
                 status: 1,
                 stdout: String::new(),
@@ -1596,6 +1909,7 @@ mod tests {
 
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("harness: ok"));
+        assert!(text.contains("workspace fs: ok"));
         assert!(text.contains("models: error"));
         assert!(text.contains("openai auth: ok"));
         assert!(text.contains("anthropic auth: error: not configured"));
@@ -1615,6 +1929,7 @@ mod tests {
                 stderr: "missing harness".into(),
             },
             MockRunner::ok(core_function_list_json()),
+            MockRunner::ok(r#"{"entries":[]}"#),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":true}"#),
             MockRunner::ok(r#"{"configured":true}"#),
@@ -1631,11 +1946,38 @@ mod tests {
     }
 
     #[test]
+    fn doctor_fails_when_workspace_fs_is_not_jailed_to_cwd() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok("harness ready\n"),
+            MockRunner::ok(r#"{"ok":true}"#),
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "S215 path escapes host_root".into(),
+            },
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "doctor"]).unwrap();
+        let mut out = Vec::new();
+
+        let err = run(cli, &runner, &mut out).unwrap_err().to_string();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains("workspace fs: error"));
+        assert!(err.contains("workspace fs"));
+        assert!(err.contains("path escapes host_root"));
+    }
+
+    #[test]
     fn doctor_fails_when_no_provider_auth_is_configured() {
         let runner = MockRunner::new(vec![
             MockRunner::ok("0.11.6\n"),
             MockRunner::ok("harness ready\n"),
             MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":false}"#),
             MockRunner::ok(r#"{"configured":false}"#),
@@ -1661,6 +2003,7 @@ mod tests {
                 stderr: "missing harness".into(),
             },
             MockRunner::ok(core_function_list_json()),
+            MockRunner::ok(r#"{"entries":[]}"#),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":true}"#),
             MockRunner::ok(r#"{"configured":true}"#),
@@ -1673,6 +2016,7 @@ mod tests {
 
         assert!(text.contains("harness::status: unavailable"));
         assert!(text.contains("core stack: ok"));
+        assert!(text.contains("ok shell::fs::ls cwd"));
         assert!(text.contains("ok models::list"));
     }
 
@@ -1701,6 +2045,7 @@ mod tests {
     fn health_probe_accepts_one_configured_provider() {
         let runner = MockRunner::new(vec![
             MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":false}"#),
             MockRunner::ok(r#"{"configured":true}"#),
@@ -1719,6 +2064,7 @@ mod tests {
     fn health_probe_fails_when_no_provider_auth_is_configured() {
         let runner = MockRunner::new(vec![
             MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":false}"#),
             MockRunner::ok(r#"{"configured":false}"#),
