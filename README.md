@@ -63,6 +63,32 @@ The boundary is the public `iii` CLI and worker functions:
 cargo install --path .
 ```
 
+## Quickstart
+
+Use this path when you want to try the CLI against a local `iii` engine:
+
+```bash
+git clone https://github.com/rohitg00/iii-code
+cd iii-code
+cp config.example.yaml config.yaml
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+iii worker add harness
+iii
+```
+
+Then, in another terminal from the same repository:
+
+```bash
+cargo run -- setup
+cargo run -- doctor
+cargo run -- chat "inspect this repo and suggest the first cleanup"
+```
+
+At least one supported provider credential is required. Start `iii` from the
+repository root so the example shell filesystem configuration points at the
+same checkout.
+
 ## Prerequisites
 
 - latest `iii` CLI on `PATH`
@@ -291,6 +317,24 @@ iii-code doctor
 iii-code models
 ```
 
+## Troubleshooting
+
+If `iii worker list` shows workers as `stopped`, confirm the `iii` engine is
+still running in another terminal. The list should change to `running` while
+the engine process is active.
+
+If `shell::fs::ls` reports `S215 path escapes host_root`, stop `iii`, restart
+it from the `iii-code` repository root, and rerun `iii-code doctor`. The sample
+configuration uses `.` for both `shell.fs.host_root` and `shell.working_dir`.
+
+If setup reports a harness SHA256 failure, keep reading the output. The CLI
+falls back to installing the core worker stack individually so local testing can
+continue while the upstream harness artifact is fixed.
+
+If `doctor` reports missing provider auth, export `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` and rerun `iii-code setup`. One provider is enough for
+single-provider use.
+
 ## Development
 
 Fresh upstream references were cloned from:
@@ -304,10 +348,14 @@ checkout paths.
 Feature parity notes live in [docs/feature-parity-gaps.md](docs/feature-parity-gaps.md).
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
 cargo test
-cargo clippy -- -D warnings
 cargo test -- --ignored
 ```
 
 Ignored tests require a running iii engine, installed workers, and provider
 credentials.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request expectations and local
+validation details.
