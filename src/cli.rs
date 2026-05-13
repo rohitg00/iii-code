@@ -136,7 +136,7 @@ pub struct ChatArgs {
     #[arg(long, default_value_t = 750)]
     pub poll_interval_ms: u64,
 
-    #[arg(long, default_value_t = 600_000)]
+    #[arg(long, default_value_t = 1_800_000)]
     pub stream_timeout_ms: u64,
 
     #[arg(long)]
@@ -157,7 +157,7 @@ impl Default for ChatArgs {
             idle_timeout_secs: 300,
             max_turns: 20,
             poll_interval_ms: 750,
-            stream_timeout_ms: 600_000,
+            stream_timeout_ms: 1_800_000,
             wait: false,
         }
     }
@@ -628,6 +628,7 @@ mod tests {
             Command::Chat(args) => {
                 assert_eq!(args.session_id.as_deref(), Some("s1"));
                 assert_eq!(args.prompt.as_deref(), Some("hi"));
+                assert_eq!(args.stream_timeout_ms, 1_800_000);
             }
             _ => panic!("expected chat command"),
         }

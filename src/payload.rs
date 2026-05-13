@@ -136,9 +136,7 @@ pub fn build_user_message(prompt: &str) -> Value {
 }
 
 pub fn build_worker_aware_user_message(prompt: &str) -> Value {
-    build_user_message(&format!(
-        "{III_CODE_CLIENT_CONTEXT}\n\nUser request:\n{prompt}"
-    ))
+    build_user_message(&format!("{prompt}\n\n{III_CODE_CLIENT_CONTEXT}"))
 }
 
 pub fn build_auth_payload(provider: &str, key: &str) -> Value {
@@ -441,10 +439,10 @@ mod tests {
         let message = build_worker_aware_user_message("fix the repo");
         let text = message["content"][0]["text"].as_str().unwrap();
 
+        assert!(text.starts_with("fix the repo"));
         assert!(text.contains("Installed iii workers"));
         assert!(text.contains("engine::functions::list"));
         assert!(text.contains("skill::fetch"));
-        assert!(text.contains("fix the repo"));
     }
 
     #[test]
