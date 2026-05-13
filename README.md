@@ -96,8 +96,11 @@ the other provider is reported as missing without blocking single-provider use.
 Use `iii-code setup --coding-full` when you want the richer coding profile from
 the public registry. It installs the base harness stack plus `mcp`, `iii-lsp`,
 and `iii-database@1.0.4`, then verifies those configured workers during health
-checks. The database worker is pinned because the current public registry has
-no `latest` tag for `iii-database`. For read-only verification later, run:
+checks. `doctor --coding-full` also checks that the MCP and database functions
+are live on the engine, so a listed-but-unusable worker no longer passes the
+profile check. The database worker is pinned because the current public
+registry has no `latest` tag for `iii-database`. For read-only verification
+later, run:
 
 ```bash
 iii-code doctor --coding-full
@@ -135,7 +138,10 @@ from the repo root so `shell::fs::*` can read and write project files. If
 process, confirm the engine was started from the repo root, and start it again
 so it picks up the current config. The shell allowlist includes common
 repo-inspection and validation commands such as `rg`, `git`, `cargo`, `npm`,
-`pnpm`, `bun`, `node`, `python`, and `make`; approval policy still lives in the
+`npx`, `pnpm`, `bun`, `node`, `python`, `pip`, `pytest`, `uv`, `go`, `find`,
+`sed`, `awk`, and `make`. It permits normal coding flows like `npm run build`
+and short `node -e` or `python -c` smoke checks while keeping destructive
+patterns and sensitive host paths blocked. Approval policy still lives in the
 worker stack.
 
 Secrets are intentionally not accepted through CLI flags because argv can leak

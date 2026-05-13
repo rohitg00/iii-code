@@ -46,6 +46,7 @@ const CORE_RUNTIME_FUNCTIONS: &[&str] = &[
     "approval::list_pending",
     "sandbox::create",
 ];
+const CODING_FULL_RUNTIME_FUNCTIONS: &[&str] = &["mcp::handler", "iii-database::query"];
 const AUTH_PROVIDERS: &[&str] = &["openai", "anthropic"];
 
 #[cfg(test)]
@@ -1149,15 +1150,44 @@ fn report_coding_full_profile<R: CommandRunner, W: Write>(
     match client.worker_list() {
         Ok(worker_list) => {
             let missing = missing_configured_workers(&worker_list, CODING_FULL_WORKER_STACK);
+            if !missing.is_empty() {
+                let missing = missing.join(", ");
+                writeln!(out, "coding profile: error: missing {missing}")?;
+                return Ok(Some(ProbeFailure {
+                    label: "coding profile".to_string(),
+                    error: format!("missing configured workers: {missing}"),
+                }));
+            }
+        }
+        Err(err) => {
+            let error = err.to_string();
+            writeln!(out, "coding profile: error: {error}")?;
+            return Ok(Some(ProbeFailure {
+                label: "coding profile".to_string(),
+                error,
+            }));
+        }
+    }
+
+    match client.trigger(
+        "engine::functions::list",
+        build_functions_payload(false),
+        DOCTOR_PROBE_TIMEOUT_MS,
+    ) {
+        Ok(value) => {
+            let missing = missing_function_ids(&value, CODING_FULL_RUNTIME_FUNCTIONS);
             if missing.is_empty() {
                 writeln!(out, "coding profile: ok")?;
                 Ok(None)
             } else {
                 let missing = missing.join(", ");
-                writeln!(out, "coding profile: error: missing {missing}")?;
+                writeln!(
+                    out,
+                    "coding profile: error: missing runtime functions {missing}"
+                )?;
                 Ok(Some(ProbeFailure {
                     label: "coding profile".to_string(),
-                    error: format!("missing configured workers: {missing}"),
+                    error: format!("missing runtime functions: {missing}"),
                 }))
             }
         }
@@ -1337,8 +1367,12 @@ fn report_harness_or_core<R: CommandRunner, W: Write>(
 }
 
 fn missing_core_runtime_functions(value: &Value) -> Vec<&'static str> {
+    missing_function_ids(value, CORE_RUNTIME_FUNCTIONS)
+}
+
+fn missing_function_ids<'a>(value: &Value, required: &'a [&'a str]) -> Vec<&'a str> {
     let ids = function_ids_from_value(value);
-    CORE_RUNTIME_FUNCTIONS
+    required
         .iter()
         .copied()
         .filter(|required| !ids.iter().any(|id| id == required))
@@ -2108,6 +2142,32 @@ mod tests {
 
         assert!(text.contains("coding profile: error: missing iii-database"));
         assert!(err.contains("coding profile"));
+    }
+
+    #[test]
+    fn doctor_checks_coding_full_runtime_functions_when_workers_are_present() {
+        let workers = "mcp binary running\niii-lsp binary running\niii-database binary running\n";
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok(workers),
+            MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"entries":[]}"#),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(workers),
+            MockRunner::ok(r#"{"functions":[{"function_id":"mcp::handler"}]}"#),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "doctor", "--coding-full"]).unwrap();
+        let mut out = Vec::new();
+
+        let err = run(cli, &runner, &mut out).unwrap_err().to_string();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("coding profile: error: missing runtime functions iii-database::query")
+        );
+        assert!(err.contains("missing runtime functions"));
     }
 
     #[test]
