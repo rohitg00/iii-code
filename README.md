@@ -82,6 +82,7 @@ In another terminal:
 
 ```bash
 iii-code setup
+iii-code setup --coding-full
 ```
 
 `setup` verifies `iii --version`, installs/updates the worker stack with
@@ -91,6 +92,16 @@ and `ANTHROPIC_API_KEY` through `auth::set_token`, then probes
 `harness::status` or the required core worker functions, `models::list`, and
 `auth::status`. At least one supported provider credential must be configured;
 the other provider is reported as missing without blocking single-provider use.
+
+Use `iii-code setup --coding-full` when you want the richer coding profile from
+the public registry. It installs the base harness stack plus `mcp`, `iii-lsp`,
+and `iii-database@1.0.4`, then verifies those configured workers during health
+checks. The database worker is pinned because the current public registry has
+no `latest` tag for `iii-database`. For read-only verification later, run:
+
+```bash
+iii-code doctor --coding-full
+```
 
 `iii worker list` showing `stopped` is normal when the engine is not running.
 Keep `iii` running in one terminal; the same list should then show the engine,
@@ -197,6 +208,11 @@ model the single `agent_call` tool, current working directory, skills index,
 live function discovery rules, and recovery policy. Passing `--system-prompt`
 replaces that harness prompt, so use it only when you intentionally want to
 take over the agent contract.
+
+On the first user turn of a new session, `iii-code` adds a short client-context
+preamble telling the model to inspect installed iii workers and live functions
+before assuming a capability is missing. This does not replace the canonical
+harness prompt; it is just first-turn context inside the transcript.
 
 `--image` selects the sandbox image used by `shell::*` tools. The default is
 `python`; use `--image node` for JavaScript/TypeScript repo work. If you add

@@ -25,6 +25,9 @@ pub const CORE_WORKER_STACK: &[&str] = &[
     "iii-sandbox",
 ];
 
+pub const CODING_FULL_WORKER_STACK: &[&str] = &["mcp", "iii-lsp", "iii-database"];
+pub const CODING_FULL_WORKER_ADD_SPECS: &[&str] = &["mcp", "iii-lsp", "iii-database@1.0.4"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub status: i32,
@@ -87,6 +90,17 @@ impl<R: CommandRunner> IiiClient<R> {
     pub fn worker_add_core(&self) -> Result<String> {
         let mut args = vec!["worker".into(), "add".into(), "--no-wait".into()];
         args.extend(CORE_WORKER_STACK.iter().map(|worker| worker.to_string()));
+        let out = self.checked_run(args)?;
+        Ok(join_output(&out))
+    }
+
+    pub fn worker_add_coding_full(&self) -> Result<String> {
+        let mut args = vec!["worker".into(), "add".into(), "--no-wait".into()];
+        args.extend(
+            CODING_FULL_WORKER_ADD_SPECS
+                .iter()
+                .map(|worker| worker.to_string()),
+        );
         let out = self.checked_run(args)?;
         Ok(join_output(&out))
     }

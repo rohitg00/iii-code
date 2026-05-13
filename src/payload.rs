@@ -10,6 +10,12 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 
 const DEFAULT_PROVIDER: &str = "anthropic";
+pub const III_CODE_CLIENT_CONTEXT: &str = "\
+iii-code client context:
+- Installed iii workers and live iii functions are the capability surface.
+- Before saying a tool is unavailable, inspect live functions with agent_call to engine::functions::list and fetch relevant skill docs with skill::fetch.
+- Prefer installed worker functions for shell, filesystem, sandbox, approval, MCP, LSP, database, session, state, stream, and queue work.
+- If a needed capability is missing, name the worker or function that should be installed with iii worker add.";
 
 #[derive(Debug, Clone)]
 pub struct RunPayloadParams {
@@ -127,6 +133,12 @@ pub fn build_user_message(prompt: &str) -> Value {
         "content": [{ "type": "text", "text": prompt }],
         "timestamp": now_millis(),
     })
+}
+
+pub fn build_worker_aware_user_message(prompt: &str) -> Value {
+    build_user_message(&format!(
+        "{III_CODE_CLIENT_CONTEXT}\n\nUser request:\n{prompt}"
+    ))
 }
 
 pub fn build_auth_payload(provider: &str, key: &str) -> Value {
@@ -422,6 +434,17 @@ mod tests {
         assert_eq!(payload["approval_required"][0], "shell::fs::write");
         assert_eq!(payload["image"], "node");
         assert_eq!(payload["idle_timeout_secs"], 120);
+    }
+
+    #[test]
+    fn worker_aware_message_nudges_live_function_discovery() {
+        let message = build_worker_aware_user_message("fix the repo");
+        let text = message["content"][0]["text"].as_str().unwrap();
+
+        assert!(text.contains("Installed iii workers"));
+        assert!(text.contains("engine::functions::list"));
+        assert!(text.contains("skill::fetch"));
+        assert!(text.contains("fix the repo"));
     }
 
     #[test]

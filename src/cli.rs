@@ -51,7 +51,7 @@ pub enum Command {
     #[command(about = "Abort a durable session through provider-router")]
     Abort(AbortArgs),
     #[command(about = "Print read-only diagnostics for the iii-code stack")]
-    Doctor,
+    Doctor(DoctorArgs),
     #[command(about = "List models from the iii models catalog")]
     Models(ModelsArgs),
     #[command(about = "List configured or connected workers")]
@@ -75,11 +75,26 @@ pub struct SetupArgs {
     #[arg(long)]
     pub skip_worker_add: bool,
 
+    #[arg(
+        long,
+        help = "Install coding-adjacent workers: mcp, iii-lsp, iii-database"
+    )]
+    pub coding_full: bool,
+
     #[arg(long)]
     pub no_health_check: bool,
 
     #[arg(long, hide = true)]
     pub ignore_env_credentials: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    #[arg(
+        long,
+        help = "Verify coding-adjacent workers: mcp, iii-lsp, iii-database"
+    )]
+    pub coding_full: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -559,8 +574,24 @@ mod tests {
         match cli.command.unwrap() {
             Command::Setup(args) => {
                 assert!(args.no_health_check);
+                assert!(!args.coding_full);
             }
             _ => panic!("expected setup command"),
+        }
+    }
+
+    #[test]
+    fn parses_coding_full_profile_flags() {
+        let setup = Cli::try_parse_from(["iii-code", "setup", "--coding-full"]).unwrap();
+        match setup.command.unwrap() {
+            Command::Setup(args) => assert!(args.coding_full),
+            _ => panic!("expected setup command"),
+        }
+
+        let doctor = Cli::try_parse_from(["iii-code", "doctor", "--coding-full"]).unwrap();
+        match doctor.command.unwrap() {
+            Command::Doctor(args) => assert!(args.coding_full),
+            _ => panic!("expected doctor command"),
         }
     }
 
