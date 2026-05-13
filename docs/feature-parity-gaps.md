@@ -6,7 +6,7 @@ thin terminal CLI on top of the upstream iii harness stack.
 ## Sources
 
 - `iii-hq/iii` main: `3512ada`
-- `iii-hq/workers` main: `90fc9fe`
+- `iii-hq/workers` main: `ee90c51`
 
 ## Boundary
 
@@ -41,8 +41,8 @@ workers from the public registry as a fallback.
 - Shell execution and sandboxing: `shell` plus `iii-sandbox`.
 - Skills: the upstream `skills` worker.
 - Abort: `router::abort` from `provider-router`.
-- Session discovery: `state::list` over scope `agent` and prefix `session/`,
-  filtered for run session state records.
+- Session discovery, transcript loading, fork, and repair: `session-tree::*`,
+  with legacy `state::*` fallback for older persisted sessions.
 
 ## Added In This CLI
 
@@ -53,9 +53,21 @@ workers from the public registry as a fallback.
 - `run` and `resume` construct the current `turn-orchestrator` payload,
   including `cwd`, `cwd_hash`, `approval_required`, sandbox `image`,
   `idle_timeout_secs`, and `max_turns`.
-- `sessions` lists durable run sessions from `state::list`.
+- The default command and `chat` open an interactive terminal shell with slash
+  commands for sessions, messages, function discovery, approvals, repair, fork,
+  and diagnostics.
+- `resume <session-id> <prompt>` loads the persisted `session-tree` transcript,
+  appends the new user message, and sends the full history back through
+  `run::start`.
+- `sessions`, `messages`, `fork`, and `repair` use `session-tree::*` first and
+  fall back to legacy state where needed.
 - `abort` calls `router::abort`.
-- Errors from `auth::set_token` redact the JSON payload before display.
+- `workers`, `functions`, and `call` expose the broader worker graph without
+  adding worker-specific code to the CLI.
+- `state` and `stream` expose shared engine primitives.
+- `approvals` lists and resolves `approval-gate` requests.
+- `sandbox` wraps the main `iii-sandbox` lifecycle and exec functions.
+- Errors from `iii trigger` redact JSON payloads before display.
 
 ## Parity Gaps
 
@@ -67,8 +79,8 @@ Features that map cleanly to existing iii workers:
   the missing piece is better CLI formatting and defaults.
 - Permission presets. This should compile to `approval_required` values and
   policy worker configuration.
-- Continue/resume ergonomics. `resume <session-id>` exists; next work is a
-  better selector using `sessions`.
+- Continue/resume ergonomics. The shell and session-tree commands exist; next
+  work is a richer selector over entries and branches.
 - Session audit and benchmark smoke runs. These should use `run::start_and_wait`
   and stored `agent` state.
 
@@ -89,7 +101,7 @@ Features that need more design before adding:
 
 ## Current Upstream Blocker
 
-As of `iii-hq/workers@90fc9fe`, `iii worker add harness` reaches the harness
+As of `iii-hq/workers@ee90c51`, `iii worker add harness` reaches the harness
 artifact and then fails the final SHA256 check in the public registry. That is
 an upstream registry/artifact issue. `iii-code` falls back to installing the
 core workers individually from the same registry while that artifact is fixed.

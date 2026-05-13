@@ -134,12 +134,13 @@ fn display_args(args: &[String]) -> String {
 }
 
 fn sanitize_args(args: &[String]) -> Vec<String> {
-    let redact_payload = args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "auth::set_token" | "run::start" | "run::start_and_wait"
-        )
-    });
+    let redact_payload = args.first().map(|arg| arg == "trigger").unwrap_or(false)
+        || args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "auth::set_token" | "run::start" | "run::start_and_wait"
+            )
+        });
     let mut sanitized = Vec::with_capacity(args.len());
     let mut redact_next = false;
 
@@ -292,6 +293,22 @@ pub mod tests {
 
         assert!(rendered.contains("--payload=[REDACTED]"));
         assert!(!rendered.contains("test-secret-value"));
+    }
+
+    #[test]
+    fn sanitize_args_redacts_any_trigger_payload() {
+        let args = vec![
+            "trigger".to_string(),
+            "--function-id".to_string(),
+            "custom::worker".to_string(),
+            "--payload".to_string(),
+            "{\"secret\":\"value\"}".to_string(),
+        ];
+
+        let rendered = display_args(&args);
+
+        assert!(rendered.contains("--payload [REDACTED]"));
+        assert!(!rendered.contains("secret"));
     }
 
     impl<T: CommandRunner + ?Sized> CommandRunner for &T {
