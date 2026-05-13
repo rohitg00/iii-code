@@ -80,7 +80,8 @@ iii-code setup
 from the same registry if harness installation fails, stores `OPENAI_API_KEY`
 and `ANTHROPIC_API_KEY` through `auth::set_token`, then probes
 `harness::status` or the required core worker functions, `models::list`, and
-`auth::status`.
+`auth::status`. At least one supported provider credential must be configured;
+the other provider is reported as missing without blocking single-provider use.
 
 `iii worker list` showing `stopped` is normal when the engine is not running.
 Keep `iii` running in one terminal; the same list should then show the engine,

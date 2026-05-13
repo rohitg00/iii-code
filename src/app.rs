@@ -43,6 +43,7 @@ const CORE_RUNTIME_FUNCTIONS: &[&str] = &[
     "approval::list_pending",
     "sandbox::create",
 ];
+const AUTH_PROVIDERS: &[&str] = &["openai", "anthropic"];
 
 #[cfg(test)]
 pub fn run<R: CommandRunner, W: Write>(cli: Cli, runner: R, out: &mut W) -> Result<()> {
@@ -737,22 +738,7 @@ fn doctor<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) -> Res
     if let Some(failure) = report_probe(client, out, "models", "models::list", json!({}))? {
         failures.push(failure);
     }
-    if let Some(failure) = report_probe(
-        client,
-        out,
-        "openai auth",
-        "auth::status",
-        build_auth_status_payload("openai"),
-    )? {
-        failures.push(failure);
-    }
-    if let Some(failure) = report_probe(
-        client,
-        out,
-        "anthropic auth",
-        "auth::status",
-        build_auth_status_payload("anthropic"),
-    )? {
+    if let Some(failure) = report_auth_statuses(client, out)? {
         failures.push(failure);
     }
 
@@ -773,21 +759,7 @@ fn health_probe<R: CommandRunner, W: Write>(client: &IiiClient<R>, out: &mut W) 
     }
     trigger_with_retry(client, "models::list", json!({}), 5_000, "models::list")?;
     writeln!(out, "ok models::list")?;
-    for provider in ["openai", "anthropic"] {
-        let value = trigger_with_retry(
-            client,
-            "auth::status",
-            build_auth_status_payload(provider),
-            5_000,
-            &format!("auth::status for {provider}"),
-        )?;
-        if let Some(failure) =
-            probe_failure_from_value(&format!("auth::status {provider}"), "auth::status", &value)
-        {
-            return Err(anyhow!("{} failed: {}", failure.label, failure.error));
-        }
-        writeln!(out, "ok auth::status {provider}")?;
-    }
+    require_any_provider_auth(client, out)?;
     Ok(())
 }
 
@@ -855,6 +827,82 @@ fn report_probe<R: CommandRunner, W: Write>(
                 error,
             }))
         }
+    }
+}
+
+fn report_auth_statuses<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<Option<ProbeFailure>> {
+    let mut failures = Vec::new();
+    let mut configured = false;
+
+    for provider in AUTH_PROVIDERS {
+        let label = format!("{provider} auth");
+        match report_probe(
+            client,
+            out,
+            &label,
+            "auth::status",
+            build_auth_status_payload(provider),
+        )? {
+            Some(failure) => failures.push(failure),
+            None => configured = true,
+        }
+    }
+
+    if configured {
+        Ok(None)
+    } else {
+        Ok(Some(provider_auth_failure(failures)))
+    }
+}
+
+fn require_any_provider_auth<R: CommandRunner, W: Write>(
+    client: &IiiClient<R>,
+    out: &mut W,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let mut configured = false;
+
+    for provider in AUTH_PROVIDERS {
+        let label = format!("auth::status {provider}");
+        let value = trigger_with_retry(
+            client,
+            "auth::status",
+            build_auth_status_payload(provider),
+            5_000,
+            &format!("auth::status for {provider}"),
+        )?;
+        if let Some(failure) = probe_failure_from_value(&label, "auth::status", &value) {
+            writeln!(out, "{label}: error: {}", failure.error)?;
+            failures.push(failure);
+        } else {
+            configured = true;
+            writeln!(out, "ok {label}")?;
+        }
+    }
+
+    if configured {
+        Ok(())
+    } else {
+        let failure = provider_auth_failure(failures);
+        Err(anyhow!("{} failed: {}", failure.label, failure.error))
+    }
+}
+
+fn provider_auth_failure(failures: Vec<ProbeFailure>) -> ProbeFailure {
+    let error = if failures.is_empty() {
+        "no configured provider credentials".to_string()
+    } else {
+        format!(
+            "no configured provider credentials ({})",
+            format_probe_failures(&failures)
+        )
+    };
+    ProbeFailure {
+        label: "provider auth".to_string(),
+        error,
     }
 }
 
@@ -1536,8 +1584,7 @@ mod tests {
         assert!(text.contains("anthropic auth: error: not configured"));
         assert!(err.contains("doctor probes failed"));
         assert!(err.contains("models"));
-        assert!(err.contains("anthropic auth"));
-        assert!(err.contains("not configured"));
+        assert!(!err.contains("provider auth"));
     }
 
     #[test]
@@ -1553,18 +1600,39 @@ mod tests {
             MockRunner::ok(core_function_list_json()),
             MockRunner::ok(r#"{"models":[]}"#),
             MockRunner::ok(r#"{"configured":true}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+        ]);
+        let cli = Cli::try_parse_from(["iii-code", "doctor"]).unwrap();
+        let mut out = Vec::new();
+
+        run(cli, &runner, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("harness: error"));
+        assert!(text.contains("core stack: ok"));
+        assert!(text.contains("anthropic auth: ok"));
+    }
+
+    #[test]
+    fn doctor_fails_when_no_provider_auth_is_configured() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok("0.11.6\n"),
+            MockRunner::ok("harness ready\n"),
+            MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":false}"#),
             MockRunner::ok(r#"{"configured":false}"#),
         ]);
         let cli = Cli::try_parse_from(["iii-code", "doctor"]).unwrap();
         let mut out = Vec::new();
 
         let err = run(cli, &runner, &mut out).unwrap_err().to_string();
-
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("harness: error"));
-        assert!(text.contains("core stack: ok"));
-        assert!(err.contains("anthropic auth"));
-        assert!(!err.contains("core stack"));
+
+        assert!(text.contains("openai auth: error: not configured"));
+        assert!(text.contains("anthropic auth: error: not configured"));
+        assert!(err.contains("provider auth"));
+        assert!(err.contains("no configured provider credentials"));
     }
 
     #[test]
@@ -1613,10 +1681,29 @@ mod tests {
     }
 
     #[test]
-    fn health_probe_fails_when_auth_status_is_unconfigured() {
+    fn health_probe_accepts_one_configured_provider() {
         let runner = MockRunner::new(vec![
             MockRunner::ok(r#"{"ok":true}"#),
             MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":false}"#),
+            MockRunner::ok(r#"{"configured":true}"#),
+        ]);
+        let client = IiiClient::new(&runner, "127.0.0.1", 49134);
+        let mut out = Vec::new();
+
+        health_probe(&client, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains("auth::status openai: error: not configured"));
+        assert!(text.contains("ok auth::status anthropic"));
+    }
+
+    #[test]
+    fn health_probe_fails_when_no_provider_auth_is_configured() {
+        let runner = MockRunner::new(vec![
+            MockRunner::ok(r#"{"ok":true}"#),
+            MockRunner::ok(r#"{"models":[]}"#),
+            MockRunner::ok(r#"{"configured":false}"#),
             MockRunner::ok(r#"{"configured":false}"#),
         ]);
         let client = IiiClient::new(&runner, "127.0.0.1", 49134);
@@ -1624,7 +1711,8 @@ mod tests {
 
         let err = health_probe(&client, &mut out).unwrap_err().to_string();
 
-        assert!(err.contains("auth::status openai failed"));
+        assert!(err.contains("provider auth failed"));
+        assert!(err.contains("no configured provider credentials"));
         assert!(err.contains("not configured"));
     }
 
